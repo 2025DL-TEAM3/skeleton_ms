@@ -18,7 +18,7 @@ class ARCSolver:
             token (str): a huggingface token for restricted models such as llama3
         """
         config_path = "artifacts/config/config.yml"
-        model_id = "meta-llama/Llama-3.2-3B-Instruct"
+        model_id = "Qwen/Qwen3-4B"
 
         # Configure the BitsAndBytes settings for 4-bit quantization to reduce memory usage
         bnb_config = BitsAndBytesConfig(
@@ -58,6 +58,7 @@ class ARCSolver:
         """
         grid = []
         row = []
+        # 토큰 id → 숫자(0~9)로 역변환하는 맵
         inv_map = {k: i for i, k in enumerate(self.pixel_ids)}
         
         for idx in ids:
@@ -66,7 +67,7 @@ class ARCSolver:
                     grid.append(row.copy())
                     row.clear()
             else:
-                row.append(inv_map.get(idx, 0))
+                row.append(inv_map.get(idx, 0)) # 없는 값은 0으로 처리
         return grid
 
     def format_grid(self, grid: List[List[int]]):
@@ -84,11 +85,12 @@ class ARCSolver:
         for row in grid:
             for col in row:
                 ids.append(self.pixel_ids[col])
-            ids.append(self.sep)
+            ids.append(self.sep)  # 한 행 끝마다 줄바꿈
         return ids
 
     def format_prompt(self, datapoint):
         """
+        학습 예시와 테스트 입력을 LLM 입력 프롬프트로 포맷팅
         Args:
             datapoint (dict): contains training data, test input
         
@@ -99,10 +101,13 @@ class ARCSolver:
         training_data = datapoint['train']
         input_test_data = datapoint['test'][0]['input']
 
+        # system 프롬프트
         sys = self.tokenizer.encode("<|begin_of_text|><|start_header_id|>system<|end_header_id|>" + "\n" + system_prompt, add_special_tokens=False)
+        # user 프롬프트(문제 설명)
         user = self.tokenizer.encode("<|start_header_id|>user<|end_header_id|>" + "\n" + user_message_template1 + "\n", add_special_tokens=False)
         inp_desc = self.tokenizer.encode("input:\n", add_special_tokens=False)
         out_desc = self.tokenizer.encode("output:\n", add_special_tokens=False)
+        # 학습 예시 추가
         for ex in training_data:
             inp = ex['input']
             out = ex['output']
@@ -114,13 +119,13 @@ class ARCSolver:
             user += out_desc
             user += out
 
+        # 추가 설명 및 테스트 입력 추가
         user += self.tokenizer.encode("\n" + user_message_template2 + "\n", add_special_tokens=False)
-
         user += inp_desc
         user += self.format_grid(input_test_data)
         user += self.tokenizer.encode("\n" + user_message_template3, add_special_tokens=False)
 
-
+        # assistant 역할 시작 토큰 추가
         messages = sys + user
         assis = self.tokenizer.encode("<|eot_id|><|start_header_id|>assistant<|end_header_id|>", add_special_tokens=False)
         messages += assis
@@ -131,13 +136,78 @@ class ARCSolver:
             "train": training_data
         }
 
-
     def train(self, train_dataset):
         """
-        Train a model with train_dataset.
-        Read a project documentation for a description of `examples` and `question`.
+        Train the model using LoRA fine-tuning
+        
+        Args:
+            train_dataset: HuggingFace dataset containing training examples
         """
-        pass
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from transformers import TrainingArguments, Trainer
+        import torch
+
+        # LoRA 설정
+        lora_config = LoraConfig(
+            r=16,                     # LoRA 랭크
+            lora_alpha=32,            # LoRA 알파
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],  # Qwen3-4B의 attention 모듈
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+
+        # 모델을 k-bit 학습을 위해 준비
+        self.model = prepare_model_for_kbit_training(self.model)
+        
+        # LoRA 적용
+        self.model = get_peft_model(self.model, lora_config)
+        
+        # 학습 인자 설정
+        training_args = TrainingArguments(
+            output_dir="artifacts/checkpoint-final",
+            num_train_epochs=3,
+            per_device_train_batch_size=4,
+            gradient_accumulation_steps=4,
+            learning_rate=2e-4,
+            fp16=True,
+            logging_steps=10,
+            save_strategy="epoch",
+            warmup_ratio=0.1,
+        )
+
+        # 데이터셋 전처리
+        def preprocess_function(examples):
+            prompts = []
+            for train_examples, test_example in zip(examples["train"], examples["test"]):
+                datapoint = {
+                    "train": train_examples,
+                    "test": [{"input": test_example["input"]}]
+                }
+                prompt = self.format_prompt(datapoint)
+                prompts.append(prompt["input_ids"])
+            return {"input_ids": prompts}
+
+        # 데이터셋 전처리
+        processed_dataset = train_dataset.map(
+            preprocess_function,
+            batched=True,
+            remove_columns=train_dataset.column_names
+        )
+
+        # Trainer 설정
+        trainer = Trainer(
+            model=self.model,
+            args=training_args,
+            train_dataset=processed_dataset,
+            data_collator=lambda data: {"input_ids": torch.stack([torch.tensor(f) for f in data["input_ids"]])}
+        )
+
+        # 학습 실행
+        trainer.train()
+
+        # 모델 저장
+        trainer.save_model()
 
     def predict(self, examples, questions_input):
         """
@@ -164,6 +234,7 @@ class ARCSolver:
             output (List[List[int]]): A 2d grid,
                 which is the output of given input question.
         """
+        # 프롬프트 데이터 구성
         datapoint = {
             "train": examples,
             "test": [
@@ -173,21 +244,25 @@ class ARCSolver:
             ]
         }
 
+        # 프롬프트 생성 및 토큰화
         prompt = self.format_prompt(datapoint)
         input_ids = torch.tensor(prompt['input_ids'], dtype=torch.long).to(self.device).view(1, -1)
 
+        # 생성 설정
         config = GenerationConfig(
             do_sample=False,
             pad_token_id=self.tokenizer.eos_token_id,
             max_new_tokens=150,
         )
 
+        # 모델로부터 출력 생성
         output = self.model.generate(
             input_ids=input_ids,
             generation_config=config,
         ).squeeze().cpu()
         N_prompt = input_ids.numel()
 
+        # 프롬프트 이후의 토큰만 추출
         output = output[N_prompt:].tolist()
         train_input = np.array(prompt['train'][0]['input'])
         train_output = np.array(prompt['train'][0]['output'])
@@ -203,9 +278,9 @@ class ARCSolver:
 
         try:
             grid = np.array(self.parse_grid(output))
-            grid = grid[:x, :y]
-            
+            grid = grid[:x, :y]  # shape 맞추기
         except Exception as e:
+            # 파싱 실패 시 랜덤 그리드 반환
             grid = np.random.randint(0, 10, (x, y))
 
         return grid
@@ -214,13 +289,9 @@ class ARCSolver:
         """
         Load pretrained weight, make model eval mode, etc.
         """
-        self.model.load_adapter("artifacts/checkpoint-final")
+        # self.model.load_adapter("artifacts/checkpoint-final")
         self.model.eval()
 
 
 if __name__ == "__main__":
     solver = ARCSolver()
-
-
-
-

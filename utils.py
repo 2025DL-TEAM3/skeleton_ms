@@ -41,6 +41,11 @@ def render_grid(grid: List[List[int]]):
 def get_base_model(model_name):
     available_models = [
         "meta-llama/Llama-3.2-1B",
+        "meta-llama/Llama-3.2-3B",
+        "Qwen/Qwen3-4B",
+        "Qwen/Qwen3-8B",
+        "google/gemma-3-4b-it",
+        "google/gemma-3-4b-pt"
     ]
     assert model_name in available_models, f"{model_name} is not available."
 

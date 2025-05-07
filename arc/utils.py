@@ -9,7 +9,6 @@ user_message_template2 = \
 '''----------------------------------------
 Now, solve the following puzzle based on its input grid by applying the rules you have learned from the training data.:
 ----------------------------------------'''
-
 user_message_template3 = \
 '''----------------------------------------
 What is the output grid? Only provide the output grid in the form as in the example input and output pairs. Do not provide any additional information:'''
