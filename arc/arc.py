@@ -44,6 +44,13 @@ class ARCSolver:
             token=token
         ).to(self.device)  # Move model to device
 
+        ###### add this if you get OOM error
+        self.model.gradient_checkpointing_enable()
+        self.model.config.use_cache = False
+        if hasattr(self.model, "enable_input_require_grads"):
+            self.model.enable_input_require_grads()
+        ######
+
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
 
         self.pixel_ids = [
@@ -185,7 +192,7 @@ class ARCSolver:
         peft_config = LoraConfig(
             task_type="CAUSAL_LM",
             inference_mode=False,
-            r=8,                     # LoRA rank - determines the size of the update matrices
+            r=16,                     # LoRA rank - determines the size of the update matrices
             lora_alpha=32,           # LoRA scaling factor - controls the magnitude of updates
             lora_dropout=0.1,        # Dropout probability for LoRA layers
             target_modules=["q_proj","k_proj","v_proj","o_proj"], # Apply LoRA to attention modules only
@@ -197,8 +204,8 @@ class ARCSolver:
         
         # Initialize dataset and data loader
         dataset = ARCDataset(train_dataset, self.tokenizer, self, steps_per_file=steps_per_file)
-        loader = DataLoader(dataset, batch_size)
-        
+        loader = DataLoader(dataset, batch_size, shuffle=True, pin_memory=True)
+
         # Initialize optimizer with specified learning rate
         optimizer = AdamW(self.model.parameters(), lr=lr)
 

@@ -22,6 +22,7 @@ class ARCDataset(Dataset):
         self.tokenizer = tokenizer
         self.solver = solver
         self.steps_per_file = steps_per_file
+
         # load JSON files
         if hasattr(dataset, 'data_files') and dataset.data_files:
             files = dataset.data_files
@@ -30,6 +31,7 @@ class ARCDataset(Dataset):
 
         print(f"Loading {len(files)} files")
 
+        # load examples
         self.examples = []
         for p in files:
             with open(p) as f:
@@ -56,13 +58,15 @@ class ARCDataset(Dataset):
         """
         Return one training sample per call:
 
-        1. Randomly pick one JSON file
+        1. Select one JSON file
         2. Sample 4 examples: 3 for train, 1 for test
         3. Format prompt and target tensors
         """
-        # 1) choose file
-        file_data = random.choice(self.examples)
+        # 1) choose file, not random (idx would be shuffled due to shuffle=True in DataLoader)
+        file_idx = (idx // self.steps_per_file) % len(self.examples)
+        file_data = self.examples[file_idx]
         examples = file_data['examples']
+
         # choose another file if there are less than 4 examples
         # this would not happen (100-1000 examples per file)
         if len(examples) < 4:
