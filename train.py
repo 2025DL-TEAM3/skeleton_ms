@@ -7,6 +7,9 @@ def main():
     parser = argparse.ArgumentParser(description='Train ARCSolver with ARC dataset')
     parser.add_argument('--token', type=str, default=None, help='HuggingFace token')
     parser.add_argument('--dataset', type=str, default='/home/student/workspace/dataset', help='Dataset name or path')
+    parser.add_argument('--save_dir', type=str, default='artifacts/qwen3-4b-lora', help='Save directory')
+    parser.add_argument('--resume_from', type=str, default=None, help='Resume training from checkpoint')
+    parser.add_argument('--val_dataset', type=str, default=None, help='Validation dataset path')
     args = parser.parse_args()
     
     # 데이터셋 로드
@@ -16,21 +19,58 @@ def main():
     # data_files 속성 추가
     dataset['train'].data_files = data_files
     
+    # 검증 데이터셋 로드 (존재하는 경우)
+    validation_dataset = None
+    if args.val_dataset:
+        print(f"Loading validation dataset from {args.val_dataset}...")
+        val_data_files = glob.glob(f"{args.val_dataset}/*.json")
+        if val_data_files:
+            validation_dataset = load_dataset('json', data_files=val_data_files)['train']
+            validation_dataset.data_files = val_data_files
+            print(f"Loaded {len(val_data_files)} validation files")
+        else:
+            print("No validation files found, skipping validation")
+    
     # ARCSolver 인스턴스 생성
     print("Initializing model...")
     solver = ARCSolver(token=args.token)
 
     # configuration
     batch_size = 2
-    lr = 1e-4
+    lr = 5e-5
     num_epochs = 5
     steps_per_file = 50
     steps_accum = 4
     warmup_rate = 0.1
+
+    # validation configuration
+    patience = 10
+    val_steps = 1000
+    val_seed = 42
+    val_steps_per_file = 1
+    max_val_files = 128
+    val_batch_size = 8
     
     # 모델 학습
     print("Starting training...")
-    solver.train(dataset['train'], batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, resume_from=None)
+    solver.train(
+        train_dataset=dataset['train'], 
+        batch_size=batch_size, 
+        lr=lr, 
+        num_epochs=num_epochs, 
+        steps_per_file=steps_per_file, 
+        steps_accum=steps_accum, 
+        warmup_rate=warmup_rate,
+        save_dir=args.save_dir,
+        resume_from=args.resume_from,
+        validation_dataset=validation_dataset,
+        patience=patience,
+        val_steps=val_steps,
+        val_seed=val_seed,
+        max_val_files=max_val_files,
+        val_steps_per_file=val_steps_per_file,
+        val_batch_size=val_batch_size
+    )
     
     print("Training completed!")
 

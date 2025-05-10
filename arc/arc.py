@@ -20,7 +20,6 @@ from transformers import BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, PeftConfig, PeftModel
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.nn.utils.rnn import pad_sequence
 
 class ARCSolver:
     """
@@ -69,7 +68,8 @@ class ARCSolver:
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id, 
             token=token,
-            cache_dir=cache_dir  # 토크나이저도 동일한 캐시 디렉토리 사용
+            cache_dir=cache_dir,  # 토크나이저도 동일한 캐시 디렉토리 사용
+            padding_side='left', # decoder-only architecture는 왼쪽 padding 사용
         )
 
         self.pixel_ids = [
@@ -169,17 +169,33 @@ class ARCSolver:
         input_ids = [item['input_ids'] for item in batch]
         target_ids = [item['target_ids'] for item in batch]
 
-        # 2) pad input_ids and target_ids
-        padded_input_ids = pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
-        )
-        padded_target_ids = pad_sequence(
-            target_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
-        )
+        # 2) get max length
+        pad_id = self.tokenizer.pad_token_id
+        max_in_len = max(len(x) for x in input_ids)
+        max_tgt_len = max(len(x) for x in target_ids)
+
+        # 3) padding tensors
+        batch_size = len(input_ids)
+        padding_input_ids = torch.full((batch_size, max_in_len), pad_id, dtype=torch.long)
+        attention_mask = torch.zeros((batch_size, max_in_len), dtype=torch.long)
+        padding_target_ids = torch.full((batch_size, max_tgt_len), pad_id, dtype=torch.long)
+
+        # 4) fill tensors
+        for i, seq in enumerate(input_ids):
+            seq_len = seq.size(0)
+            start_idx = max_in_len - seq_len
+            padding_input_ids[i, start_idx:] = seq
+            attention_mask[i, start_idx:] = 1
+
+        for i, seq in enumerate(target_ids):
+            seq_len = seq.size(0)
+            start_idx = max_tgt_len - seq_len
+            padding_target_ids[i, start_idx:] = seq
 
         return {
-            "input_ids": padded_input_ids,
-            "target_ids": padded_target_ids
+            "input_ids": padding_input_ids,
+            "target_ids": padding_target_ids,
+            "attention_mask": attention_mask
         }
 
     def seq2seq_loss(self, prompt_ids, target_ids):
@@ -194,17 +210,6 @@ class ARCSolver:
         Returns:
             torch.Tensor: Computed loss value
         """
-        # Get EOS token ID, Append EOS token to target
-        eos = self.tokenizer.eos_token_id
-        batch_size = target_ids.size(0)
-        eos_col = torch.full(
-            (batch_size, 1),
-            eos,
-            dtype=target_ids.dtype,
-            device=target_ids.device
-        )
-        target_ids = torch.cat([target_ids, eos_col], dim=1)
-
         # Concatenate input and target
         inp = torch.cat([prompt_ids, target_ids], dim=1)
 
@@ -220,7 +225,9 @@ class ARCSolver:
         outputs = self.model(input_ids=inp, attention_mask=attn_mask, labels=labels)
         return outputs.loss
 
-    def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, resume_from: str = None):
+    def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, 
+               save_dir: str = 'artifacts/qwen3-4b-lora', resume_from: str = None, validation_dataset=None, 
+               patience=5, val_steps=1000, val_seed=42, max_val_files=50, val_steps_per_file=2, val_batch_size=4):
         """
         Train the model using LoRA fine-tuning.
         
@@ -232,7 +239,34 @@ class ARCSolver:
             steps_per_file (int): Number of training steps per file
             steps_accum (int): Number of steps to accumulate gradients before updating
             warmup_rate (float): Warmup rate for the learning rate
+            save_dir (str): Directory to save the model and optimizer state
+            resume_from (str): Path to resume training from checkpoint
+            validation_dataset: Dataset for validation during training
+            patience (int): Number of validation checks without improvement before early stopping
+            val_steps (int): Number of steps between validation checks
+            val_seed (int): Random seed for validation sampling
+            max_val_files (int): Maximum number of files to use for validation
+            val_steps_per_file (int): Steps per file for validation (less than training)
+            val_batch_size (int): Batch size for validation
         """
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # 로깅 파일 설정
+        log_file = os.path.join(save_dir, "training_log.txt")
+        
+        # 로깅 함수 정의
+        def log_message(message, print_to_console=True):
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(f"{message}\n")
+            if print_to_console:
+                print(message)
+        
+        # 학습 시작 정보 로깅
+        timestamp = torch.cuda.current_device() if torch.cuda.is_available() else "CPU"
+        log_message(f"===== Training started at {timestamp} =====")
+        log_message(f"Batch size: {batch_size}, LR: {lr}, Epochs: {num_epochs}")
+        log_message(f"Steps per file: {steps_per_file}, Grad. accum: {steps_accum}, Warmup rate: {warmup_rate}")
+        
         # Configure LoRA parameters for efficient fine-tuning
         peft_config = LoraConfig(
             task_type="CAUSAL_LM",
@@ -248,8 +282,20 @@ class ARCSolver:
         self.model.print_trainable_parameters() # Display the number of trainable parameters
         
         # Initialize dataset and data loader
-        dataset = ARCDataset(train_dataset, self.tokenizer, self, steps_per_file=steps_per_file)
+        dataset = ARCDataset(train_dataset, self.tokenizer, self, steps_per_file=steps_per_file, is_validation=False)
         loader = DataLoader(dataset, batch_size, shuffle=True, pin_memory=True, collate_fn=self.dynamic_collate)
+
+        # Initialize validation dataset and data loader if provided
+        val_loader = None
+        if validation_dataset is not None:
+            val_dataset = ARCDataset(validation_dataset, self.tokenizer, self, 
+                                    steps_per_file=val_steps_per_file,  # 검증에는 더 적은 스텝 사용
+                                    is_validation=True,  # 결정적 샘플링 활성화
+                                    seed=val_seed,       # 고정된 시드 사용
+                                    max_val_files=max_val_files)  # 검증에 사용할 최대 파일 수
+            val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, pin_memory=True, collate_fn=self.dynamic_collate)
+            log_message(f"Validation dataset loaded with {len(val_dataset)} steps, using seed {val_seed}, max files {max_val_files}, steps/file {val_steps_per_file}, batch size {val_batch_size}")
+            log_message(f"Total validation batches: {len(val_loader)}")
 
         # Initialize optimizer with specified learning rate
         optimizer = AdamW(self.model.parameters(), lr=lr)
@@ -262,7 +308,18 @@ class ARCSolver:
         start_epoch, global_step = 0, 0
         if resume_from:
             start_epoch, global_step = self.load_checkpoint(resume_from, optimizer, scheduler)
-            print(f"Resuming from {resume_from}: epoch {start_epoch} and global step {global_step}")
+            log_message(f"Resuming from {resume_from}: epoch {start_epoch} and global step {global_step}")
+
+        # Early stopping variables
+        best_val_loss = float('inf')
+        val_loss_history = []
+        patience_counter = 0
+        best_model_path = os.path.join(save_dir, "checkpoint-best")
+        
+        # CSV 형식의 메트릭 로그 파일 생성
+        metrics_log_file = os.path.join(save_dir, "metrics_log.txt")
+        with open(metrics_log_file, 'w', encoding='utf-8') as f:
+            f.write("global_step,epoch,train_loss,val_loss,val_accuracy,learning_rate\n")
 
         # Set model to training mode
         self.model.train()
@@ -291,20 +348,144 @@ class ARCSolver:
                 
                 # Track and display training progress
                 total_loss += loss.item()
-                if step % 10 == 0:
-                    print(f"[Epoch {epoch+1}] step {step} loss {loss.item():.4f}")
+                current_lr = scheduler.get_last_lr()[0]
+                
+                if step % 100 == 0:
+                    log_message(f"[Epoch {epoch+1}] step {step} loss {loss.item():.4f} lr {current_lr:.6f}")
+
+                # Validation check
+                if val_loader is not None and global_step % val_steps == 0:
+                    val_loss, val_accuracy = self.validate(val_loader)
+                    log_message(f"[Validation] global_step {global_step} loss {val_loss:.4f} accuracy {val_accuracy:.4f}")
+                    
+                    # 메트릭 로깅
+                    with open(metrics_log_file, 'a', encoding='utf-8') as f:
+                        f.write(f"{global_step},{epoch+1},{loss.item():.6f},{val_loss:.6f},{val_accuracy:.6f},{current_lr:.8f}\n")
+                    
+                    # Early stopping check
+                    val_loss_history.append(val_loss)
+                    
+                    # If validation loss improved
+                    if val_loss < best_val_loss:
+                        log_message(f"Validation loss improved from {best_val_loss:.4f} to {val_loss:.4f}")
+                        best_val_loss = val_loss
+                        # Save best model
+                        self.save_model(best_model_path, optimizer, scheduler, epoch, global_step)
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+                        log_message(f"Validation loss did not improve. Patience: {patience_counter}/{patience}")
+                    
+                    # Early stopping
+                    if patience_counter >= patience:
+                        log_message(f"Early stopping triggered after {patience} validation checks without improvement")
+                        # Load best model
+                        self.load_checkpoint(best_model_path, optimizer, scheduler)
+                        return
+                    
+                    # Set model back to training mode after validation
+                    self.model.train()
 
                 # Save checkpoint every 5000 steps
                 if global_step % 5000 == 0:
-                    self.save_model(f"artifacts/qwen3-4b-lora/checkpoint-{global_step}", optimizer, scheduler, epoch, global_step)
+                    self.save_model(os.path.join(save_dir, f"checkpoint-{global_step}"), optimizer, scheduler, epoch, global_step)
             
             # Print average loss for the epoch
-            print(f"Epoch {epoch+1} avg loss {total_loss/len(loader):.4f}")
+            avg_epoch_loss = total_loss/len(loader)
+            log_message(f"Epoch {epoch+1} avg loss {avg_epoch_loss:.4f}")
+            
+            # 에폭 완료 후 메트릭 로깅
+            if val_loader is not None:
+                val_loss, val_accuracy = self.validate(val_loader)
+                log_message(f"[Epoch End Validation] epoch {epoch+1} loss {val_loss:.4f} accuracy {val_accuracy:.4f}")
+                with open(metrics_log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"{global_step},{epoch+1},{avg_epoch_loss:.6f},{val_loss:.6f},{val_accuracy:.6f},{current_lr:.8f}\n")
         
         self.model.eval()  # Set model to evaluation mode after training
+        log_message("===== Training completed =====")
 
         # save final model
-        self.save_model("artifacts/qwen3-4b-lora/checkpoint-final", optimizer, scheduler, epoch, global_step)
+        self.save_model(os.path.join(save_dir, "checkpoint-final"), optimizer, scheduler, epoch, global_step)
+
+    def validate(self, val_loader):
+        """
+        Validate the model on the validation dataset
+        
+        Args:
+            val_loader: DataLoader for validation dataset
+            
+        Returns:
+            avg_loss (float): Average loss on validation dataset
+            accuracy (float): Accuracy on validation dataset
+        """
+        print(f"=== Starting validation (total {len(val_loader)} batches) ===")
+        self.model.eval()
+        total_loss = 0
+        total_samples = 0
+        correct_predictions = 0
+        config = GenerationConfig(do_sample=True, temperature=0.7, top_p=0.8, top_k=20,
+            bos_token_id= 151643,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.pad_token_id,
+            max_new_tokens=150)
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(val_loader):
+                # 진행 상황 출력 (20배치마다)
+                if batch_idx % 20 == 0 or batch_idx == len(val_loader) - 1:
+                    print(f"Validation progress: {batch_idx+1}/{len(val_loader)} batches")
+                
+                input_ids = batch['input_ids'].to(self.device)
+                target_ids = batch['target_ids'].to(self.device)
+                
+                # Compute validation loss
+                loss = self.seq2seq_loss(input_ids, target_ids)
+                total_loss += loss.item() * input_ids.size(0)
+                total_samples += input_ids.size(0)
+
+                # get attention mask (should ignore padding tokens when generating)
+                attn_mask = batch['attention_mask'].to(self.device)
+                
+                # Generate outputs for accuracy calculation
+                outputs = self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attn_mask,
+                    generation_config=config,
+                )
+                
+                # Calculate accuracy by comparing predictions with targets
+                # This is a simple token-level accuracy metric
+                for i in range(input_ids.size(0)):
+                    pred_tokens = outputs[i, input_ids.size(1):].tolist()
+                    target_tokens = target_ids[i].tolist()
+                    
+                    # Remove padding tokens from target
+                    target_tokens = [t for t in target_tokens if t != self.tokenizer.pad_token_id]
+                    
+                    # Compare predicted grid with target grid
+                    pred_grid = self.parse_grid(pred_tokens)
+                    target_grid = self.parse_grid(target_tokens)
+                    
+                    # Check if grids are same shape and values
+                    if len(pred_grid) == len(target_grid):
+                        all_match = True
+                        for row_idx in range(len(pred_grid)):
+                            if row_idx < len(target_grid):
+                                if pred_grid[row_idx] != target_grid[row_idx]:
+                                    all_match = False
+                                    break
+                            else:
+                                all_match = False
+                                break
+                        
+                        if all_match:
+                            correct_predictions += 1
+        
+        avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
+        accuracy = correct_predictions / total_samples if total_samples > 0 else 0
+        
+        print(f"=== Validation complete: loss {avg_loss:.4f}, accuracy {accuracy:.4f} ===")
+        return avg_loss, accuracy
 
     def load_checkpoint(self, path, optimizer=None, scheduler=None):
         """
@@ -392,7 +573,7 @@ class ARCSolver:
         # 프롬프트 생성 및 토큰화
         prompt = self.format_prompt(datapoint)
         ids = torch.tensor(prompt['input_ids'], device=self.device).unsqueeze(0) # (1, seq_len)
-        attn_mask = torch.ones_like(ids)
+        attn_mask = ids.ne(self.tokenizer.pad_token_id).long()
 
         # 생성 설정
         config = GenerationConfig(do_sample=True, temperature=0.7, top_p=0.8, top_k=20,
@@ -443,9 +624,9 @@ class ARCSolver:
                 is_trainable=False,
                 cache_dir=cache_dir
             )
-            print("Loaded LoRA adapter")
+            print(f"Loaded LoRA adapter: {path}")
         except Exception as e:
-            print("No adapter found:", e)
+            print(f"No adapter found: {e}")
         self.model.eval()
 
 if __name__ == "__main__":
