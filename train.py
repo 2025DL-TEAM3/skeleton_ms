@@ -26,10 +26,11 @@ def main():
     num_epochs = 5
     steps_per_file = 50
     steps_accum = 4
+    warmup_rate = 0.1
     
     # 모델 학습
     print("Starting training...")
-    solver.train(dataset['train'], batch_size, lr, num_epochs, steps_per_file, steps_accum)
+    solver.train(dataset['train'], batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, resume_from=None)
     
     print("Training completed!")
 

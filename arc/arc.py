@@ -7,8 +7,8 @@ import json
 
 from .utils import system_prompt, user_message_template1, user_message_template2, user_message_template3
 from .dataset import ARCDataset
-from transformers import BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, PeftConfig, PeftModel
+from transformers import BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer, get_linear_schedule_with_warmup
+from peft import LoraConfig, get_peft_model, PeftConfig, PeftModel
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 
@@ -24,6 +24,7 @@ class ARCSolver:
         """
         config_path = "artifacts/config/config.yml"
         model_id = "Qwen/Qwen3-4B"
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         # Configure the BitsAndBytes settings for 4-bit quantization to reduce memory usage
         bnb_config = BitsAndBytesConfig(
@@ -41,7 +42,7 @@ class ARCSolver:
             use_cache=False, # Disable caching to save memory
             device_map='auto', # Automatically map the model to available devices (e.g., GPUs)
             token=token
-        )
+        ).to(self.device)  # Move model to device
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
 
@@ -49,7 +50,6 @@ class ARCSolver:
             self.tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)
         ]
         self.sep = self.tokenizer.encode("\n", add_special_tokens=False)[0]
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     def parse_grid(self, ids: List[int]):
         """
@@ -168,7 +168,7 @@ class ARCSolver:
         outputs = self.model(input_ids=inp, labels=labels)
         return outputs.loss
 
-    def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum):
+    def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, resume_from: str = None):
         """
         Train the model using LoRA fine-tuning.
         
@@ -179,6 +179,7 @@ class ARCSolver:
             num_epochs (int): Number of training epochs
             steps_per_file (int): Number of training steps per file
             steps_accum (int): Number of steps to accumulate gradients before updating
+            warmup_rate (float): Warmup rate for the learning rate
         """
         # Configure LoRA parameters for efficient fine-tuning
         peft_config = LoraConfig(
@@ -200,11 +201,21 @@ class ARCSolver:
         
         # Initialize optimizer with specified learning rate
         optimizer = AdamW(self.model.parameters(), lr=lr)
-        self.model.train()  # Set model to training mode
-        
+
+        # warmup steps
+        total_steps = num_epochs * len(dataset) // batch_size
+        warmup_steps = int(total_steps * warmup_rate)
+        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+
+        start_epoch, global_step = 0, 0
+        if resume_from:
+            start_epoch, global_step = self.load_checkpoint(resume_from, optimizer, scheduler)
+            print(f"Resuming from {resume_from}: epoch {start_epoch} and global step {global_step}")
+
+        # Set model to training mode
+        self.model.train()
         # Training loop
-        global_step = 0
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, num_epochs):
             total_loss = 0
             # steps = len(dataset) / batch_size
             for step, batch in enumerate(loader):
@@ -223,25 +234,72 @@ class ARCSolver:
                     # Clip gradients to prevent exploding gradients
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                     optimizer.step()  # Update model parameters
+                    scheduler.step()  # Update learning rate
                     optimizer.zero_grad()  # Clear gradients
                 
                 # Track and display training progress
                 total_loss += loss.item()
                 if step % 10 == 0:
                     print(f"[Epoch {epoch+1}] step {step} loss {loss.item():.4f}")
+
+                # Save checkpoint every 1000 steps
+                if global_step % 1000 == 0:
+                    self.save_model(f"artifacts/qwen3-4b-lora/checkpoint-{global_step}", optimizer, scheduler, epoch, global_step)
             
             # Print average loss for the epoch
             print(f"Epoch {epoch+1} avg loss {total_loss/len(loader):.4f}")
         
         self.model.eval()  # Set model to evaluation mode after training
 
-    def save_model(self, path="artifacts/qwen3-4b-lora"):
+        # save final model
+        self.save_model("artifacts/qwen3-4b-lora/checkpoint-final", optimizer, scheduler, epoch, global_step)
+
+    def load_checkpoint(self, path, optimizer=None, scheduler=None):
+        """
+        Load the model and its configuration
+        """
+        # 1) model + PEFT adapter load
+        self.model = PeftModel.from_pretrained(self.model, path, is_trainable=True).to(self.device)
+        # 2) optimizer / scheduler state load
+        opt_path = os.path.join(path, "optimizer.pth")
+        if optimizer is not None and os.path.isfile(opt_path):
+            optimizer.load_state_dict(torch.load(opt_path, map_location=self.device))
+        sch_path = os.path.join(path, "scheduler.pth")
+        if scheduler is not None and os.path.isfile(sch_path):
+            scheduler.load_state_dict(torch.load(sch_path, map_location=self.device))
+        # 3) epoch / global_step restore (optional)
+        state_path = os.path.join(path, "training_state.json")
+        start_epoch, start_step = 0, 0
+        if os.path.isfile(state_path):
+            st = json.load(open(state_path))
+            start_epoch = st.get('epoch', 0)
+            start_step  = st.get('global_step', 0)
+        return start_epoch, start_step
+
+    def save_model(self, path=None, optimizer=None, scheduler=None, epoch=None, global_step=None):
         """
         Save the model and its configuration
         """
+        if path is None:
+            path = "artifacts/qwen3-4b-lora/checkpoint-final"
         os.makedirs(path, exist_ok=True)
+        # save model weight + PEFT adapter
         self.model.save_pretrained(path)
-        # save config
+        # save optimizer + scheduler state
+        if optimizer is not None:
+            torch.save(optimizer.state_dict(), os.path.join(path, "optimizer.pth"))
+        if scheduler is not None:
+            torch.save(scheduler.state_dict(), os.path.join(path, "scheduler.pth"))
+        # training state
+        state = {}
+        if epoch is not None:
+            state['epoch'] = epoch
+        if global_step is not None:
+            state['global_step'] = global_step
+        if state:
+            with open(os.path.join(path, "training_state.json"), "w") as f:
+                json.dump(state, f, indent=2)
+        # save config metadata
         info = {
             'base': self.model.config._name_or_path,
             'type': self.model.config.model_type,
@@ -292,7 +350,8 @@ class ARCSolver:
                                max_new_tokens=150)
 
         # 모델로부터 출력 생성
-        out = self.model.generate(input_ids=ids, attention_mask=attn_mask, generation_config=config).squeeze().cpu()
+        with torch.no_grad():
+            out = self.model.generate(input_ids=ids, attention_mask=attn_mask, generation_config=config).squeeze().cpu()
         N_prompt = ids.size(1)
 
         # 프롬프트 이후의 토큰만 추출
@@ -317,7 +376,7 @@ class ARCSolver:
 
         return grid
 
-    def prepare_evaluation(self, path="artifacts/qwen3-4b-lora"):
+    def prepare_evaluation(self, path="artifacts/qwen3-4b-lora/checkpoint-final"):
         """
         Load pretrained weight, make model eval mode, etc.
         """
