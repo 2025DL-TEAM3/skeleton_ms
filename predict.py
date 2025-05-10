@@ -77,6 +77,8 @@ def main():
     parser.add_argument('--token', type=str, default=None, help='HuggingFace token')
     parser.add_argument('--dataset', type=str, default='/home/student/workspace/dataset', 
                         help='Dataset path')
+    parser.add_argument('--model_path', type=str, default='artifacts/qwen3-4b-lora/checkpoint-final', 
+                        help='Model name')
     parser.add_argument('--num_examples', type=int, default=50, 
                         help='Number of examples to evaluate')
     parser.add_argument('--visualize', action='store_true', 
@@ -116,7 +118,7 @@ def main():
     # ARCSolver 인스턴스 생성 및 학습된 모델 로드
     print("모델 초기화 중...")
     solver = ARCSolver(token=args.token)
-    solver.prepare_evaluation()
+    solver.prepare_evaluation(args.model_path)
     
     # 결과 저장용 변수
     results = []

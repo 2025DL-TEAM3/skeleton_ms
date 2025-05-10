@@ -60,10 +60,10 @@ class ARCSolver:
         ).to(self.device)  # Move model to device
 
         ###### add this if you get OOM error
-        self.model.gradient_checkpointing_enable()
-        self.model.config.use_cache = False
-        if hasattr(self.model, "enable_input_require_grads"):
-            self.model.enable_input_require_grads()
+        # self.model.gradient_checkpointing_enable()
+        # self.model.config.use_cache = False
+        # if hasattr(self.model, "enable_input_require_grads"):
+        #     self.model.enable_input_require_grads()
         ######
 
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -294,8 +294,8 @@ class ARCSolver:
                 if step % 10 == 0:
                     print(f"[Epoch {epoch+1}] step {step} loss {loss.item():.4f}")
 
-                # Save checkpoint every 1000 steps
-                if global_step % 1000 == 0:
+                # Save checkpoint every 5000 steps
+                if global_step % 5000 == 0:
                     self.save_model(f"artifacts/qwen3-4b-lora/checkpoint-{global_step}", optimizer, scheduler, epoch, global_step)
             
             # Print average loss for the epoch
@@ -396,7 +396,7 @@ class ARCSolver:
 
         # 생성 설정
         config = GenerationConfig(do_sample=True, temperature=0.7, top_p=0.8, top_k=20,
-                               bos_token_id=self.tokenizer.bos_token_id,
+                               bos_token_id= 151643,
                                eos_token_id=self.tokenizer.eos_token_id,
                                pad_token_id=self.tokenizer.pad_token_id,
                                max_new_tokens=150)
