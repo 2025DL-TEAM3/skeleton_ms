@@ -1,8 +1,17 @@
+import os
+os.environ["HF_HOME"]            = "/2025pdp/.cache"
+os.environ["TRANSFORMERS_CACHE"] = "/2025pdp/.cache"
+os.environ["HF_DATASETS_CACHE"]  = "/2025pdp/.cache/huggingface/datasets"
+os.environ["HF_METRICS_CACHE"]   = "/2025pdp/.cache/huggingface/metrics"
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "true"
+os.environ["HF_HUB_DISABLE_EXPERIMENTAL_WARNING"] = "true"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"  # 이미 다운로드된 경우만 사용
+
 from transformers import GenerationConfig
 import torch
 from typing import List
 import numpy as np
-import os
 import json
 
 from .utils import system_prompt, user_message_template1, user_message_template2, user_message_template3
@@ -25,6 +34,10 @@ class ARCSolver:
         config_path = "artifacts/config/config.yml"
         model_id = "Qwen/Qwen3-4B"
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        
+        # 허깅페이스 캐시 디렉토리 설정
+        cache_dir = "/2025pdp/.cache"
+        os.makedirs(cache_dir, exist_ok=True)
 
         # Configure the BitsAndBytes settings for 4-bit quantization to reduce memory usage
         bnb_config = BitsAndBytesConfig(
@@ -41,7 +54,8 @@ class ARCSolver:
             torch_dtype=torch.float16, # Set the data type for the model
             use_cache=False, # Disable caching to save memory
             device_map='auto', # Automatically map the model to available devices (e.g., GPUs)
-            token=token
+            token=token,
+            cache_dir=cache_dir  # 캐시 디렉토리 지정
         ).to(self.device)  # Move model to device
 
         ###### add this if you get OOM error
@@ -51,7 +65,11 @@ class ARCSolver:
             self.model.enable_input_require_grads()
         ######
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_id, 
+            token=token,
+            cache_dir=cache_dir  # 토크나이저도 동일한 캐시 디렉토리 사용
+        )
 
         self.pixel_ids = [
             self.tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)
@@ -388,8 +406,16 @@ class ARCSolver:
         Load pretrained weight, make model eval mode, etc.
         """
         try:
-            peft_conf = PeftConfig.from_pretrained(path)
-            self.model = PeftModel.from_pretrained(self.model, path, is_trainable=False)
+            # 캐시 디렉토리 설정
+            cache_dir = "/2025pdp/.cache"
+            
+            peft_conf = PeftConfig.from_pretrained(path, cache_dir=cache_dir)
+            self.model = PeftModel.from_pretrained(
+                self.model, 
+                path, 
+                is_trainable=False,
+                cache_dir=cache_dir
+            )
             print("Loaded LoRA adapter")
         except Exception as e:
             print("No adapter found:", e)
