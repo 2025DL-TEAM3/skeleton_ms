@@ -21,7 +21,7 @@ def main():
     solver = ARCSolver(token=args.token)
 
     # configuration
-    batch_size = 1 # 1보다 키우면 padding 이슈 있음
+    batch_size = 1
     lr = 1e-4
     num_epochs = 5
     steps_per_file = 50

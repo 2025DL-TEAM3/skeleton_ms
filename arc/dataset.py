@@ -62,7 +62,7 @@ class ARCDataset(Dataset):
         2. Sample 4 examples: 3 for train, 1 for test
         3. Format prompt and target tensors
         """
-        # 1) choose file, not random (idx would be shuffled due to shuffle=True in DataLoader)
+        # 1) choose file, not random = suitable for ARC-AGI dataset (idx would be shuffled due to shuffle=True in DataLoader)
         file_idx = (idx // self.steps_per_file) % len(self.examples)
         file_data = self.examples[file_idx]
         examples = file_data['examples']

@@ -11,6 +11,7 @@ from transformers import BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, PeftConfig, PeftModel
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
+from torch.nn.utils.rnn import pad_sequence
 
 class ARCSolver:
     """
@@ -142,6 +143,27 @@ class ARCSolver:
                 "input": test_input,
                 "train": train_examples}
 
+    def dynamic_collate(self, batch):
+        """
+        Custom collate function to handle variable-length sequences
+        """
+        # 1) get input_ids and target_ids
+        input_ids = [item['input_ids'] for item in batch]
+        target_ids = [item['target_ids'] for item in batch]
+
+        # 2) pad input_ids and target_ids
+        padded_input_ids = pad_sequence(
+            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+        )
+        padded_target_ids = pad_sequence(
+            target_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+        )
+
+        return {
+            "input_ids": padded_input_ids,
+            "target_ids": padded_target_ids
+        }
+
     def seq2seq_loss(self, prompt_ids, target_ids):
         """
         Calculate loss for sequence-to-sequence learning.
@@ -154,25 +176,30 @@ class ARCSolver:
         Returns:
             torch.Tensor: Computed loss value
         """
-        # Get EOS token ID
+        # Get EOS token ID, Append EOS token to target
         eos = self.tokenizer.eos_token_id
-        
-        # Append EOS token if missing
-        # This helps the model recognize the end of the sequence
-        if target_ids[0, -1] != eos:
-            target_ids = torch.cat([target_ids, torch.tensor([[eos]], device=target_ids.device)], dim=1)
-        
-        # Concatenate input and target to create the full sequence
+        batch_size = target_ids.size(0)
+        eos_col = torch.full(
+            (batch_size, 1),
+            eos,
+            dtype=target_ids.dtype,
+            device=target_ids.device
+        )
+        target_ids = torch.cat([target_ids, eos_col], dim=1)
+
+        # Concatenate input and target
         inp = torch.cat([prompt_ids, target_ids], dim=1)
-        
-        # Create labels for loss calculation
-        # Set prompt portion to -100 to exclude from loss calculation
+
+        # Attention_mask: ignore padding tokens
+        attn_mask = inp.ne(self.tokenizer.pad_token_id).long()
+
+        # Create labels: -100 for prompt portion, padding portion
         labels = inp.clone()
         labels[:, :prompt_ids.size(1)] = -100
-        
-        # Pass through model to calculate loss
-        # Teacher forcing: model is trained to predict the correct next token
-        outputs = self.model(input_ids=inp, labels=labels)
+        labels[inp == self.tokenizer.pad_token_id] = -100
+
+        # Pass through model to calculate loss: Teacher forcing
+        outputs = self.model(input_ids=inp, attention_mask=attn_mask, labels=labels)
         return outputs.loss
 
     def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, resume_from: str = None):
@@ -204,7 +231,7 @@ class ARCSolver:
         
         # Initialize dataset and data loader
         dataset = ARCDataset(train_dataset, self.tokenizer, self, steps_per_file=steps_per_file)
-        loader = DataLoader(dataset, batch_size, shuffle=True, pin_memory=True)
+        loader = DataLoader(dataset, batch_size, shuffle=True, pin_memory=True, collate_fn=self.dynamic_collate)
 
         # Initialize optimizer with specified learning rate
         optimizer = AdamW(self.model.parameters(), lr=lr)
@@ -231,7 +258,7 @@ class ARCSolver:
                 # Move batch to device and compute loss
                 input_ids = batch['input_ids'].to(self.device)
                 target_ids = batch['target_ids'].to(self.device)
-                loss = self.seq2seq_loss(input_ids, target_ids)
+                loss = self.seq2seq_loss(input_ids, target_ids) / steps_accum
                 
                 # Backpropagation
                 loss.backward()
