@@ -353,8 +353,8 @@ class ARCSolver:
                 if step % 100 == 0:
                     log_message(f"[Epoch {epoch+1}] step {step} loss {loss.item():.4f} lr {current_lr:.6f}")
 
-                # Validation check
-                if val_loader is not None and global_step % val_steps == 0:
+                # Validation check - 첫 번째 에폭에서는 검증 건너뛰기
+                if val_loader is not None and global_step % val_steps == 0 and epoch >= 1:
                     val_loss, val_accuracy = self.validate(val_loader)
                     log_message(f"[Validation] global_step {global_step} loss {val_loss:.4f} accuracy {val_accuracy:.4f}")
                     
@@ -394,8 +394,8 @@ class ARCSolver:
             avg_epoch_loss = total_loss/len(loader)
             log_message(f"Epoch {epoch+1} avg loss {avg_epoch_loss:.4f}")
             
-            # 에폭 완료 후 메트릭 로깅
-            if val_loader is not None:
+            # 에폭 완료 후 메트릭 로깅 - 첫 번째 에폭 이후부터 수행
+            if val_loader is not None and epoch >= 1:
                 val_loss, val_accuracy = self.validate(val_loader)
                 log_message(f"[Epoch End Validation] epoch {epoch+1} loss {val_loss:.4f} accuracy {val_accuracy:.4f}")
                 with open(metrics_log_file, 'a', encoding='utf-8') as f:
@@ -431,8 +431,8 @@ class ARCSolver:
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(val_loader):
-                # 진행 상황 출력 (20배치마다)
-                if batch_idx % 20 == 0 or batch_idx == len(val_loader) - 1:
+                # 진행 상황 출력
+                if batch_idx == (len(val_loader) // 2) or batch_idx == len(val_loader) - 1:
                     print(f"Validation progress: {batch_idx+1}/{len(val_loader)} batches")
                 
                 input_ids = batch['input_ids'].to(self.device)
