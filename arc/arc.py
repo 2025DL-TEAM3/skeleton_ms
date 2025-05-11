@@ -129,37 +129,40 @@ class ARCSolver:
         Returns:
             prompt (dict): dictionary that contains input ids and additional informations
         """
-        train_examples = datapoint['train']
-        test_input = datapoint['test'][0]['input']
-
-        # manual ChatML-like encoding
-        tokens = []
-        # system
+        n = len(datapoint['train'])
+        plural = "s" if n != 1 else ""
+        # 1) system
+        tokens = self.tokenizer.encode(
+            f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
+            + system_prompt + "\n",
+            add_special_tokens=False
+        )
+        # 2) user_message_template1
+        header = user_message_template1.format(n=n, plural=plural)
         tokens += self.tokenizer.encode(
-            f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{system_prompt}\n",
-            add_special_tokens=False)
-        # user description
-        tokens += self.tokenizer.encode(
-            f"<|start_header_id|>user<|end_header_id|>\n{user_message_template1}\n",
-            add_special_tokens=False)
-        # train examples
-        for ex in train_examples:
+            f"<|start_header_id|>user<|end_header_id|>\n{header}\n",
+            add_special_tokens=False
+        )
+        # 3) examples with labels
+        for i, ex in enumerate(datapoint['train'], start=1):
             inp = self.format_grid(ex['input'])
             out = self.format_grid(ex['output'])
-            tokens += self.tokenizer.encode("input:\n", add_special_tokens=False) + inp
-            tokens += self.tokenizer.encode("output:\n", add_special_tokens=False) + out
-        # test example
-        tokens += self.tokenizer.encode(f"\n{user_message_template2}\n", add_special_tokens=False)
-        tokens += self.tokenizer.encode("input:\n", add_special_tokens=False)
-        tokens += self.format_grid(test_input)
-        tokens += self.tokenizer.encode(f"\n{user_message_template3}", add_special_tokens=False)
-        # assistant start
+            tokens += self.tokenizer.encode(f"Example {i} Input:\n", add_special_tokens=False) + inp
+            tokens += self.tokenizer.encode(f"Example {i} Output:\n", add_special_tokens=False) + out
+        # 4) test prompt
         tokens += self.tokenizer.encode(
-            "<|eot_id|><|start_header_id|>assistant<|end_header_id|>",
-            add_special_tokens=False)
-        return {"input_ids": tokens,
-                "input": test_input,
-                "train": train_examples}
+            f"\n<|start_header_id|>user<|end_header_id|>\n{user_message_template2}\n"
+            + "Test Input:\n", add_special_tokens=False
+        ) + self.format_grid(datapoint['test'][0]['input'])
+        tokens += self.tokenizer.encode(
+            f"\n{user_message_template3}\n<|eot_id|><|start_header_id|>assistant<|end_header_id|>",
+            add_special_tokens=False
+        )
+        return {
+            "input_ids": tokens,
+            "input": datapoint['test'][0]['input'],
+            "train": datapoint['train']
+        }
 
     def dynamic_collate(self, batch):
         """
@@ -227,7 +230,7 @@ class ARCSolver:
 
     def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, 
                save_dir: str = 'artifacts/qwen3-4b-lora', resume_from: str = None, validation_dataset=None, 
-               patience=5, val_steps=1000, val_seed=42, max_val_files=50, val_steps_per_file=2, val_batch_size=4):
+               patience=10, val_steps=1000, val_seed=42, max_val_files=50, val_steps_per_file=2, val_batch_size=4):
         """
         Train the model using LoRA fine-tuning.
         
@@ -311,8 +314,8 @@ class ARCSolver:
             log_message(f"Resuming from {resume_from}: epoch {start_epoch} and global step {global_step}")
 
         # Early stopping variables
+        best_val_accuracy = 0
         best_val_loss = float('inf')
-        val_loss_history = []
         patience_counter = 0
         best_model_path = os.path.join(save_dir, "checkpoint-best")
         
@@ -362,19 +365,30 @@ class ARCSolver:
                     with open(metrics_log_file, 'a', encoding='utf-8') as f:
                         f.write(f"{global_step},{epoch+1},{loss.item():.6f},{val_loss:.6f},{val_accuracy:.6f},{current_lr:.8f}\n")
                     
-                    # Early stopping check
-                    val_loss_history.append(val_loss)
+                    # 손실과 정확도를 모두 고려한 early stopping
+                    improved = False
+                    improvement_message = []
                     
-                    # If validation loss improved
+                    # 정확도 향상 확인
+                    if val_accuracy > best_val_accuracy:
+                        improvement_message.append(f"Validation accuracy improved from {best_val_accuracy:.4f} to {val_accuracy:.4f}")
+                        best_val_accuracy = val_accuracy
+                        improved = True
+                    
+                    # 손실 향상 확인 (정확도가 동일할 때도 손실이 감소했으면 개선으로 간주)
                     if val_loss < best_val_loss:
-                        log_message(f"Validation loss improved from {best_val_loss:.4f} to {val_loss:.4f}")
+                        improvement_message.append(f"Validation loss improved from {best_val_loss:.4f if best_val_loss is not None else 'None'} to {val_loss:.4f}")
                         best_val_loss = val_loss
+                        improved = True
+                    
+                    if improved:
+                        log_message(", ".join(improvement_message))
                         # Save best model
                         self.save_model(best_model_path, optimizer, scheduler, epoch, global_step)
                         patience_counter = 0
                     else:
                         patience_counter += 1
-                        log_message(f"Validation loss did not improve. Patience: {patience_counter}/{patience}")
+                        log_message(f"Validation metrics did not improve. Patience: {patience_counter}/{patience}")
                     
                     # Early stopping
                     if patience_counter >= patience:
@@ -394,12 +408,9 @@ class ARCSolver:
             avg_epoch_loss = total_loss/len(loader)
             log_message(f"Epoch {epoch+1} avg loss {avg_epoch_loss:.4f}")
             
-            # 에폭 완료 후 메트릭 로깅 - 첫 번째 에폭 이후부터 수행
-            if val_loader is not None and epoch >= 1:
-                val_loss, val_accuracy = self.validate(val_loader)
-                log_message(f"[Epoch End Validation] epoch {epoch+1} loss {val_loss:.4f} accuracy {val_accuracy:.4f}")
-                with open(metrics_log_file, 'a', encoding='utf-8') as f:
-                    f.write(f"{global_step},{epoch+1},{avg_epoch_loss:.6f},{val_loss:.6f},{val_accuracy:.6f},{current_lr:.8f}\n")
+            # 에폭 완료 후 메트릭 로깅 - train loss만 기록
+            with open(metrics_log_file, 'a', encoding='utf-8') as f:
+                f.write(f"{global_step},{epoch+1},{avg_epoch_loss:.6f},,,{current_lr:.8f}\n")
         
         self.model.eval()  # Set model to evaluation mode after training
         log_message("===== Training completed =====")
@@ -422,12 +433,16 @@ class ARCSolver:
         self.model.eval()
         total_loss = 0
         total_samples = 0
-        correct_predictions = 0
-        config = GenerationConfig(do_sample=True, temperature=0.7, top_p=0.8, top_k=20,
-            bos_token_id= 151643,
+        correct_predictions = 0.0
+        
+        # 검증 시에는 Greedy decoding으로 일관된 출력 생성
+        val_config = GenerationConfig(
+            do_sample=False,  # 샘플링 없이 확정적 생성
+            bos_token_id=151643,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
-            max_new_tokens=150)
+            max_new_tokens=150
+        )
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(val_loader):
@@ -450,7 +465,7 @@ class ARCSolver:
                 outputs = self.model.generate(
                     input_ids=input_ids,
                     attention_mask=attn_mask,
-                    generation_config=config,
+                    generation_config=val_config,
                 )
                 
                 # Calculate accuracy by comparing predictions with targets
@@ -466,20 +481,32 @@ class ARCSolver:
                     pred_grid = self.parse_grid(pred_tokens)
                     target_grid = self.parse_grid(target_tokens)
                     
-                    # Check if grids are same shape and values
-                    if len(pred_grid) == len(target_grid):
-                        all_match = True
-                        for row_idx in range(len(pred_grid)):
-                            if row_idx < len(target_grid):
-                                if pred_grid[row_idx] != target_grid[row_idx]:
-                                    all_match = False
-                                    break
-                            else:
-                                all_match = False
-                                break
+                    try:
+                        # numpy 배열로 변환하여 shape 비교 및 내용 확인을 간소화
+                        pred_np = np.array(pred_grid)
+                        target_np = np.array(target_grid)
                         
-                        if all_match:
-                            correct_predictions += 1
+                        # 점수 계산 방식:
+                        # 1. shape 일치 시 기본적으로 0.5점
+                        # 2. 내용까지 완벽히 일치하면 1.0점
+                        # 3. shape 불일치 시 0점
+                        
+                        # 두 배열의 shape 비교
+                        if pred_np.shape == target_np.shape:
+                            # Shape이 일치하면 기본 0.5점
+                            score = 0.5
+                            
+                            # 내용까지 모두 일치하면 1.0점으로 업그레이드
+                            if np.array_equal(pred_np, target_np):
+                                score = 1.0
+                                
+                            correct_predictions += score
+                        else:
+                            # Shape 불일치
+                            correct_predictions += 0.0
+                    except (ValueError, TypeError) as e:
+                        # 배열 변환 실패 시 0점 처리
+                        correct_predictions += 0.0
         
         avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
         accuracy = correct_predictions / total_samples if total_samples > 0 else 0
@@ -575,12 +602,17 @@ class ARCSolver:
         ids = torch.tensor(prompt['input_ids'], device=self.device).unsqueeze(0) # (1, seq_len)
         attn_mask = ids.ne(self.tokenizer.pad_token_id).long()
 
-        # 생성 설정
-        config = GenerationConfig(do_sample=True, temperature=0.7, top_p=0.8, top_k=20,
-                               bos_token_id= 151643,
-                               eos_token_id=self.tokenizer.eos_token_id,
-                               pad_token_id=self.tokenizer.pad_token_id,
-                               max_new_tokens=150)
+        # 생성 설정 - 실제 예측에서는 샘플링 사용
+        config = GenerationConfig(
+            do_sample=True, 
+            temperature=0.7, 
+            top_p=0.8, 
+            top_k=20,
+            bos_token_id=151643,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.pad_token_id,
+            max_new_tokens=150
+        )
 
         # 모델로부터 출력 생성
         with torch.no_grad():
@@ -602,6 +634,11 @@ class ARCSolver:
             y = (train_output.shape[1] * test_input.shape[1]) // train_input.shape[1]
 
         try:
+            # predict 시에는 혹시모를 eos, pad token 제거?
+            # def _clean_generated_ids(ids: List[int]):
+            #     valid = set(self.pixel_ids) | {self.sep}
+            #     return [i for i in ids if i in valid]
+            # output = _clean_generated_ids(output)
             grid = np.array(self.parse_grid(output))
         except Exception as e:
             # 파싱 실패 시 랜덤 그리드 반환

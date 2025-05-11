@@ -38,14 +38,14 @@ def main():
     # configuration
     batch_size = 2
     lr = 5e-5
-    num_epochs = 5
+    num_epochs = 10
     steps_per_file = 50
     steps_accum = 4
     warmup_rate = 0.1
 
     # validation configuration
     patience = 10
-    val_steps = 1000
+    val_steps = 3000
     val_seed = 42
     val_steps_per_file = 1
     max_val_files = 128
