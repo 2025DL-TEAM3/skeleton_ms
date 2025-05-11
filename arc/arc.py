@@ -377,7 +377,7 @@ class ARCSolver:
                     
                     # 손실 향상 확인 (정확도가 동일할 때도 손실이 감소했으면 개선으로 간주)
                     if val_loss < best_val_loss:
-                        improvement_message.append(f"Validation loss improved from {best_val_loss:.4f if best_val_loss is not None else 'None'} to {val_loss:.4f}")
+                        improvement_message.append(f"Validation loss improved from {best_val_loss:.4f} to {val_loss:.4f}")
                         best_val_loss = val_loss
                         improved = True
                     
