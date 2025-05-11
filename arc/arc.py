@@ -119,49 +119,104 @@ class ARCSolver:
             ids.append(self.sep)  # 한 행 끝마다 줄바꿈
         return ids
 
-    def format_prompt(self, datapoint):
-        """
-        Format training data and test input into LLM input tokens
+    # def format_prompt(self, datapoint):
+    #     """
+    #     Format training data and test input into LLM input tokens
 
-        Args:
-            datapoint (dict): contains training data, test input
+    #     Args:
+    #         datapoint (dict): contains training data, test input
         
-        Returns:
-            prompt (dict): dictionary that contains input ids and additional informations
-        """
+    #     Returns:
+    #         prompt (dict): dictionary that contains input ids and additional informations
+    #     """
+    #     n = len(datapoint['train'])
+    #     plural = "s" if n != 1 else ""
+    #     # 1) system
+    #     tokens = self.tokenizer.encode(
+    #         f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
+    #         + system_prompt + "\n",
+    #         add_special_tokens=False
+    #     )
+    #     # 2) user_message_template1
+    #     header = user_message_template1.format(n=n, plural=plural)
+    #     tokens += self.tokenizer.encode(
+    #         f"<|start_header_id|>user<|end_header_id|>\n{header}\n",
+    #         add_special_tokens=False
+    #     )
+    #     # 3) examples with labels
+    #     for i, ex in enumerate(datapoint['train'], start=1):
+    #         inp = self.format_grid(ex['input'])
+    #         out = self.format_grid(ex['output'])
+    #         tokens += self.tokenizer.encode(f"Example {i} Input:\n", add_special_tokens=False) + inp
+    #         tokens += self.tokenizer.encode(f"Example {i} Output:\n", add_special_tokens=False) + out
+    #     # 4) test prompt
+    #     tokens += self.tokenizer.encode(
+    #         f"\n<|start_header_id|>user<|end_header_id|>\n{user_message_template2}\n"
+    #         + "Test Input:\n", add_special_tokens=False
+    #     ) + self.format_grid(datapoint['test'][0]['input'])
+    #     tokens += self.tokenizer.encode(
+    #         f"\n{user_message_template3}\n<|eot_id|><|start_header_id|>assistant<|end_header_id|>",
+    #         add_special_tokens=False
+    #     )
+    #     return {
+    #         "input_ids": tokens,
+    #         "input": datapoint['test'][0]['input'],
+    #         "train": datapoint['train']
+    #     }
+
+    def grid_to_str(self, grid: List[List[int]]):
+        # 줄마다 012… 형식, 마지막 줄 포함 모든 줄 끝에 \n
+        return "".join(
+            f"{''.join(str(c) for c in row)}\n"
+            for row in grid
+        )
+
+    def format_prompt(self, datapoint):
+        # 1) Prepare core user content
         n = len(datapoint['train'])
-        plural = "s" if n != 1 else ""
-        # 1) system
-        tokens = self.tokenizer.encode(
-            f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
-            + system_prompt + "\n",
-            add_special_tokens=False
-        )
-        # 2) user_message_template1
+        plural = 's' if n != 1 else ''
         header = user_message_template1.format(n=n, plural=plural)
-        tokens += self.tokenizer.encode(
-            f"<|start_header_id|>user<|end_header_id|>\n{header}\n",
-            add_special_tokens=False
-        )
-        # 3) examples with labels
+
+        # Build example block
+        examples_block = ''
         for i, ex in enumerate(datapoint['train'], start=1):
-            inp = self.format_grid(ex['input'])
-            out = self.format_grid(ex['output'])
-            tokens += self.tokenizer.encode(f"Example {i} Input:\n", add_special_tokens=False) + inp
-            tokens += self.tokenizer.encode(f"Example {i} Output:\n", add_special_tokens=False) + out
-        # 4) test prompt
-        tokens += self.tokenizer.encode(
-            f"\n<|start_header_id|>user<|end_header_id|>\n{user_message_template2}\n"
-            + "Test Input:\n", add_special_tokens=False
-        ) + self.format_grid(datapoint['test'][0]['input'])
-        tokens += self.tokenizer.encode(
-            f"\n{user_message_template3}\n<|eot_id|><|start_header_id|>assistant<|end_header_id|>",
-            add_special_tokens=False
+            examples_block += f"Example {i} Input:\n"
+            examples_block += self.grid_to_str(ex['input'])
+            examples_block += f"Example {i} Output:\n"
+            examples_block += self.grid_to_str(ex['output'])
+
+        # Build test input block
+        test_input = datapoint['test'][0]['input']
+        test_block = (
+            f"{user_message_template2}\n"
+            f"Test Input:\n" + self.grid_to_str(test_input)
         )
+
+        # 2) Assemble messages for chat template
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": header + "\n" + examples_block},
+            {"role": "user",   "content": test_block},
+            {"role": "user",   "content": user_message_template3}
+        ]
+
+        # 3) Apply chat template without tokenizing
+        text = self.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False,
+            enable_thinking=False
+        )
+
+        # 4) Manually tokenize the resulting prompt text
+        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+        # Extract the first sequence in the batch
+        input_ids = inputs["input_ids"][0]
+
         return {
-            "input_ids": tokens,
-            "input": datapoint['test'][0]['input'],
-            "train": datapoint['train']
+            'input_ids': input_ids,
+            'input': test_input,
+            'train': datapoint['train'],
         }
 
     def dynamic_collate(self, batch):
