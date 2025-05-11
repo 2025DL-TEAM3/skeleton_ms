@@ -20,7 +20,7 @@ from transformers import BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, PeftConfig, PeftModel
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-
+from torch.nn.utils.rnn import pad_sequence
 class ARCSolver:
     """
     You should implement a `Solver` class for the project.
@@ -69,7 +69,6 @@ class ARCSolver:
             model_id, 
             token=token,
             cache_dir=cache_dir,  # 토크나이저도 동일한 캐시 디렉토리 사용
-            padding_side='left', # decoder-only architecture는 왼쪽 padding 사용
         )
 
         self.pixel_ids = [
@@ -98,6 +97,8 @@ class ARCSolver:
                     grid.append(row.copy())
                     row.clear()
             else:
+                if idx == self.tokenizer.eos_token_id:
+                    break
                 row.append(inv_map.get(idx, 0)) # 없는 값은 0으로 처리
         return grid
 
@@ -209,7 +210,7 @@ class ARCSolver:
         )
 
         # 4) Manually tokenize the resulting prompt text
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(text, return_tensors="pt")
         # Extract the first sequence in the batch
         input_ids = inputs["input_ids"][0]
 
@@ -223,37 +224,38 @@ class ARCSolver:
         """
         Custom collate function to handle variable-length sequences
         """
-        # 1) get input_ids and target_ids
         input_ids = [item['input_ids'] for item in batch]
         target_ids = [item['target_ids'] for item in batch]
 
-        # 2) get max length
-        pad_id = self.tokenizer.pad_token_id
-        max_in_len = max(len(x) for x in input_ids)
-        max_tgt_len = max(len(x) for x in target_ids)
+        padded_input_ids = pad_sequence(
+            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="right"
+        )
+        padded_target_ids = pad_sequence(
+            target_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="right"
+        )
+        
+        return {
+            "input_ids": padded_input_ids,
+            "target_ids": padded_target_ids,
+        }
 
-        # 3) padding tensors
-        batch_size = len(input_ids)
-        padding_input_ids = torch.full((batch_size, max_in_len), pad_id, dtype=torch.long)
-        attention_mask = torch.zeros((batch_size, max_in_len), dtype=torch.long)
-        padding_target_ids = torch.full((batch_size, max_tgt_len), pad_id, dtype=torch.long)
+    def dynamic_collate_val(self, batch):
+        """
+        Custom collate function for validation, decoder-only architecture should be left-padded during inference
+        """
+        input_ids = [item['input_ids'] for item in batch]
+        target_ids = [item['target_ids'] for item in batch]
 
-        # 4) fill tensors
-        for i, seq in enumerate(input_ids):
-            seq_len = seq.size(0)
-            start_idx = max_in_len - seq_len
-            padding_input_ids[i, start_idx:] = seq
-            attention_mask[i, start_idx:] = 1
-
-        for i, seq in enumerate(target_ids):
-            seq_len = seq.size(0)
-            start_idx = max_tgt_len - seq_len
-            padding_target_ids[i, start_idx:] = seq
+        padded_input_ids = pad_sequence(
+            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left"
+        )
+        padded_target_ids = pad_sequence(
+            target_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left"
+        )
 
         return {
-            "input_ids": padding_input_ids,
-            "target_ids": padding_target_ids,
-            "attention_mask": attention_mask
+            "input_ids": padded_input_ids,
+            "target_ids": padded_target_ids,
         }
 
     def seq2seq_loss(self, prompt_ids, target_ids):
@@ -351,7 +353,7 @@ class ARCSolver:
                                     is_validation=True,  # 결정적 샘플링 활성화
                                     seed=val_seed,       # 고정된 시드 사용
                                     max_val_files=max_val_files)  # 검증에 사용할 최대 파일 수
-            val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, pin_memory=True, collate_fn=self.dynamic_collate)
+            val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, pin_memory=True, collate_fn=self.dynamic_collate_val)
             log_message(f"Validation dataset loaded with {len(val_dataset)} steps, using seed {val_seed}, max files {max_val_files}, steps/file {val_steps_per_file}, batch size {val_batch_size}")
             log_message(f"Total validation batches: {len(val_loader)}")
 
@@ -514,7 +516,7 @@ class ARCSolver:
                 total_samples += input_ids.size(0)
 
                 # get attention mask (should ignore padding tokens when generating)
-                attn_mask = batch['attention_mask'].to(self.device)
+                attn_mask = input_ids.ne(self.tokenizer.pad_token_id).long()
                 
                 # Generate outputs for accuracy calculation
                 outputs = self.model.generate(
@@ -689,11 +691,6 @@ class ARCSolver:
             y = (train_output.shape[1] * test_input.shape[1]) // train_input.shape[1]
 
         try:
-            # predict 시에는 혹시모를 eos, pad token 제거?
-            # def _clean_generated_ids(ids: List[int]):
-            #     valid = set(self.pixel_ids) | {self.sep}
-            #     return [i for i in ids if i in valid]
-            # output = _clean_generated_ids(output)
             grid = np.array(self.parse_grid(output))
         except Exception as e:
             # 파싱 실패 시 랜덤 그리드 반환
