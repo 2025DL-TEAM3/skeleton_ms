@@ -21,6 +21,8 @@ from peft import LoraConfig, get_peft_model, PeftConfig, PeftModel
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
+from torch.nn import functional as F
+
 class ARCSolver:
     """
     You should implement a `Solver` class for the project.
@@ -75,6 +77,12 @@ class ARCSolver:
             self.tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)
         ]
         self.sep = self.tokenizer.encode("\n", add_special_tokens=False)[0]
+        self.allowed_tokens = set(
+            self.pixel_ids
+            + [self.sep, self.tokenizer.eos_token_id]
+        )
+        V = self.model.config.vocab_size
+        self.disallowed_tokens = [i for i in range(V) if i not in self.allowed_tokens]
 
     def parse_grid(self, ids: List[int]):
         """
@@ -260,32 +268,42 @@ class ARCSolver:
             "target_ids": padded_target_ids,
         }
 
-    def seq2seq_loss(self, prompt_ids, target_ids):
+    def seq2seq_loss(self, prompt_ids, target_ids, lambda_reg: float = 0.01):
         """
-        Calculate loss for sequence-to-sequence learning.
-        Uses teacher forcing to help the model predict the correct next token.
-
-        Args:
-            prompt_ids (torch.Tensor): Token IDs of the input prompt
-            target_ids (torch.Tensor): Token IDs of the target sequence
-
-        Returns:
-            torch.Tensor: Computed loss value
+        Teacher-forcing seq2seq loss + disallowed-token 확률 억제 regularization.
+        lambda_reg: disallowed 확률 페널티 강도 (0.01 ~ 0.2 권장)
         """
-        # Concatenate input and target
+        # 1) concat input + target
         inp = torch.cat([prompt_ids, target_ids], dim=1)
-
-        # Attention_mask: ignore padding tokens
         attn_mask = inp.ne(self.tokenizer.pad_token_id).long()
 
-        # Create labels: -100 for prompt portion, padding portion
+        # 2) forward pass
+        outputs = self.model(input_ids=inp, attention_mask=attn_mask)
+        logits = outputs.logits  # (B, L_total, V)
+
+        # 3) prepare labels (-100 for prompt and pad)
         labels = inp.clone()
         labels[:, :prompt_ids.size(1)] = -100
-        labels[inp == self.tokenizer.pad_token_id] = -100
+        labels[labels == self.tokenizer.pad_token_id] = -100
 
-        # Pass through model to calculate loss: Teacher forcing
-        outputs = self.model(input_ids=inp, attention_mask=attn_mask, labels=labels)
-        return outputs.loss
+        # 4) standard CE loss (ignore_index=-100)
+        ce_loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)), 
+            labels.view(-1),
+            ignore_index=-100
+        )
+
+        # 5) disallowed-token 확률 합산 → regularization term
+        probs = F.softmax(logits, dim=-1)              # (B, L, V)
+        # disallowed tokens 만 뽑아서 합
+        p_dis = probs[..., self.disallowed_tokens].sum(dim=-1)  # (B, L)
+        # prompt/pad 위치 mask
+        mask = (labels != -100).float()               # (B, L)
+        # valid 위치 평균
+        reg_term = (p_dis * mask).sum() / mask.sum()
+
+        # 6) total loss
+        return ce_loss + lambda_reg * reg_term
 
     def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, 
                save_dir: str = 'artifacts/qwen3-4b-lora', resume_from: str = None, validation_dataset=None, 
