@@ -676,8 +676,8 @@ class ARCSolver:
         config = GenerationConfig(
             do_sample=True, 
             temperature=0.7, 
-            top_p=0.8, 
-            top_k=20,
+            top_p=0.6, # 0.8
+            top_k=10, # 20
             bos_token_id=151643,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
