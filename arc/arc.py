@@ -100,6 +100,8 @@ class ARCSolver:
                 if idx == self.tokenizer.eos_token_id:
                     break
                 row.append(inv_map.get(idx, 0)) # 없는 값은 0으로 처리
+        if row:
+            grid.append(row.copy())
         return grid
 
     def format_grid(self, grid: List[List[int]]):
@@ -360,10 +362,21 @@ class ARCSolver:
         # Initialize optimizer with specified learning rate
         optimizer = AdamW(self.model.parameters(), lr=lr)
 
-        # warmup steps
-        total_steps = num_epochs * len(dataset) // batch_size
-        warmup_steps = int(total_steps * warmup_rate)
-        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+        # 1) 한 에폭당 optimizer step 수
+        steps_per_epoch = (len(dataset) // batch_size) // steps_accum
+
+        # 2) 전체 optimizer step 수
+        total_optimizer_steps = num_epochs * steps_per_epoch
+
+        # 3) 워밍업 스텝 수
+        warmup_steps = int(total_optimizer_steps * warmup_rate)
+        log_message(f"Warmup steps: {warmup_steps}, Total optimizer steps: {total_optimizer_steps}")
+
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_optimizer_steps,
+        )
 
         start_epoch, global_step = 0, 0
         if resume_from:
@@ -656,7 +669,7 @@ class ARCSolver:
 
         # 프롬프트 생성 및 토큰화
         prompt = self.format_prompt(datapoint)
-        ids = torch.tensor(prompt['input_ids'], device=self.device).unsqueeze(0) # (1, seq_len)
+        ids = prompt['input_ids'].unsqueeze(0).to(self.device) # (1, seq_len)
         attn_mask = ids.ne(self.tokenizer.pad_token_id).long()
 
         # 생성 설정 - 실제 예측에서는 샘플링 사용
