@@ -1,0 +1,1 @@
+global_step,epoch,train_loss,val_loss,val_accuracy,learning_rate

@@ -1,0 +1,11 @@
+===== Training started at 0 =====
+Batch size: 2, LR: 5e-05, Epochs: 10
+Steps per file: 50, Grad. accum: 4, Warmup rate: 0.1
+Validation dataset loaded with 128 steps, using seed 42, max files 128, steps/file 1, batch size 8
+Total validation batches: 16
+Warmup steps: 3750, Total optimizer steps: 37500
+[Epoch 1] step 0 loss 2.4180 lr 0.000000
+[Epoch 1] step 100 loss 2.4629 lr 0.000000
+[Epoch 1] step 200 loss 3.4180 lr 0.000001
+[Epoch 1] step 300 loss 2.0996 lr 0.000001
+[Epoch 1] step 400 loss 2.7891 lr 0.000001
