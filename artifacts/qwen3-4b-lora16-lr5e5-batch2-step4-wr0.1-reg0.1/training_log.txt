@@ -48,3 +48,4 @@ Warmup steps: 3750, Total optimizer steps: 37500
 [Epoch 1] step 4100 loss 0.0000 lr 0.000014
 [Epoch 1] step 4200 loss 0.0000 lr 0.000014
 [Epoch 1] step 4300 loss 0.0000 lr 0.000014
+[Epoch 1] step 4400 loss 0.0000 lr 0.000015

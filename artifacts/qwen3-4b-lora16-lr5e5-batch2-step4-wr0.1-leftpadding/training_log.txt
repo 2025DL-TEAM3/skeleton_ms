@@ -109,3 +109,4 @@ Warmup steps: 3750, Total optimizer steps: 37500
 [Epoch 1] step 9600 loss 0.0726 lr 0.000032
 [Epoch 1] step 9700 loss 0.0713 lr 0.000032
 [Epoch 1] step 9800 loss 0.0211 lr 0.000033
+[Epoch 1] step 9900 loss 0.0045 lr 0.000033
