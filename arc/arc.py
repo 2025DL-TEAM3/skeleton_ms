@@ -53,7 +53,7 @@ class ARCSolver:
             attn_implementation='sdpa', # Use scaled-dot product attention for better performance
             torch_dtype=torch.float16, # Set the data type for the model
             use_cache=False, # Disable caching to save memory
-            device_map='auto', # Automatically map the model to available devices (e.g., GPUs)
+            device_map=self.device, # Automatically map the model to available devices (e.g., GPUs)
             token=token,
             cache_dir=cache_dir  # 캐시 디렉토리 지정
         ).to(self.device)  # Move model to device
@@ -230,10 +230,10 @@ class ARCSolver:
         target_ids = [item['target_ids'] for item in batch]
 
         padded_input_ids = pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="right"
+            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left"
         )
         padded_target_ids = pad_sequence(
-            target_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="right"
+            target_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left"
         )
         
         return {

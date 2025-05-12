@@ -45,7 +45,7 @@ def main():
 
     # validation configuration
     patience = 10
-    val_steps = 3000
+    val_steps = 5000
     val_seed = 42
     val_steps_per_file = 1
     max_val_files = 128
