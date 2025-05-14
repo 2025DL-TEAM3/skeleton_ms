@@ -21,6 +21,8 @@ from peft import LoraConfig, get_peft_model, PeftConfig, PeftModel
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
+import torch.nn.functional as F
+
 class ARCSolver:
     """
     You should implement a `Solver` class for the project.
@@ -75,6 +77,11 @@ class ARCSolver:
             self.tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)
         ]
         self.sep = self.tokenizer.encode("\n", add_special_tokens=False)[0]
+        self.allowed_tokens = set(
+            self.pixel_ids + [self.sep, self.tokenizer.eos_token_id]
+        )
+        V = self.model.config.vocab_size
+        self.disallowed_tokens = [i for i in range(V) if i not in self.allowed_tokens]
 
     def parse_grid(self, ids: List[int]):
         """
@@ -241,25 +248,6 @@ class ARCSolver:
             "target_ids": padded_target_ids,
         }
 
-    def dynamic_collate_val(self, batch):
-        """
-        Custom collate function for validation, decoder-only architecture should be left-padded during inference
-        """
-        input_ids = [item['input_ids'] for item in batch]
-        target_ids = [item['target_ids'] for item in batch]
-
-        padded_input_ids = pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left"
-        )
-        padded_target_ids = pad_sequence(
-            target_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left"
-        )
-
-        return {
-            "input_ids": padded_input_ids,
-            "target_ids": padded_target_ids,
-        }
-
     def seq2seq_loss(self, prompt_ids, target_ids):
         """
         Calculate loss for sequence-to-sequence learning.
@@ -286,6 +274,44 @@ class ARCSolver:
         # Pass through model to calculate loss: Teacher forcing
         outputs = self.model(input_ids=inp, attention_mask=attn_mask, labels=labels)
         return outputs.loss
+
+    def seq2seq_loss_with_regularization(self, prompt_ids, target_ids, epoch=0, lambda_base=0.01, tau=0.05):
+        """
+        Teacher-forcing seq2seq loss + margin-based disallowed-token regularization.
+        lambda_base: disallowed 확률 페널티 강도 (0.01 ~ 0.2 권장)
+        tau: margin threshold - 이 값보다 높은 확률만 페널티 적용
+        epoch: 현재 에폭 - 첫 에폭에서는 정규화 적용하지 않음
+        """
+        # 1) concat input + target
+        inp = torch.cat([prompt_ids, target_ids], dim=1)
+        attn_mask = inp.ne(self.tokenizer.pad_token_id).long()
+
+        # 2) prepare labels (-100 for prompt and pad)
+        labels = inp.clone()
+        labels[:, :prompt_ids.size(1)] = -100
+        labels[labels == self.tokenizer.pad_token_id] = -100
+
+        # 3) forward pass - teacher forcing with model's built-in loss
+        outputs = self.model(input_ids=inp, attention_mask=attn_mask, labels=labels)
+        ce_loss = outputs.loss
+        logits = outputs.logits  # (B, L_total, V)
+
+        # 4) margin-based regularization term
+        log_probs = F.log_softmax(logits, dim=-1)  # 로그 확률 계산 (B, L, V)
+        
+        # disallowed 토큰에 대한 로그 확률을 모두 더한 후 지수화
+        dis_idx = torch.tensor(self.disallowed_tokens, device=logits.device)
+        log_p_dis = torch.logsumexp(log_probs.index_select(-1, dis_idx), dim=-1)  # (B, L)
+        p_dis = torch.exp(log_p_dis)  # 로그 확률을 다시 확률로 변환
+        
+        # target 부분에 대해서만 계산
+        tgt_dis = p_dis[:, prompt_ids.size(1):]  # target part only (B, L_tgt)
+        over = torch.relu(tgt_dis - tau)  # margin (B, L_tgt)
+        reg_term = over.mean()  # average
+        
+        # λ ramp‑up after 1 epoch
+        lam = 0.0 if epoch < 1 else lambda_base
+        return ce_loss + lam * reg_term
 
     def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, 
                save_dir: str = 'artifacts/qwen3-4b-lora', resume_from: str = None, validation_dataset=None, 
@@ -333,8 +359,8 @@ class ARCSolver:
         peft_config = LoraConfig(
             task_type="CAUSAL_LM",
             inference_mode=False,
-            r=16,                     # LoRA rank - determines the size of the update matrices
-            lora_alpha=32,           # LoRA scaling factor - controls the magnitude of updates
+            r=8,                     # LoRA rank - determines the size of the update matrices
+            lora_alpha=16,           # LoRA scaling factor - controls the magnitude of updates
             lora_dropout=0.1,        # Dropout probability for LoRA layers
             target_modules=["q_proj","k_proj","v_proj","o_proj"], # Apply LoRA to attention modules only
         )
@@ -355,7 +381,7 @@ class ARCSolver:
                                     is_validation=True,  # 결정적 샘플링 활성화
                                     seed=val_seed,       # 고정된 시드 사용
                                     max_val_files=max_val_files)  # 검증에 사용할 최대 파일 수
-            val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, pin_memory=True, collate_fn=self.dynamic_collate_val)
+            val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, pin_memory=True, collate_fn=self.dynamic_collate)
             log_message(f"Validation dataset loaded with {len(val_dataset)} steps, using seed {val_seed}, max files {max_val_files}, steps/file {val_steps_per_file}, batch size {val_batch_size}")
             log_message(f"Total validation batches: {len(val_loader)}")
 
@@ -379,15 +405,29 @@ class ARCSolver:
         )
 
         start_epoch, global_step = 0, 0
-        if resume_from:
-            start_epoch, global_step = self.load_checkpoint(resume_from, optimizer, scheduler)
-            log_message(f"Resuming from {resume_from}: epoch {start_epoch} and global step {global_step}")
-
         # Early stopping variables
         best_val_accuracy = 0
         best_val_loss = float('inf')
         patience_counter = 0
         best_model_path = os.path.join(save_dir, "checkpoint-best")
+
+        if resume_from:
+            start_epoch, global_step, best_val_accuracy, best_val_loss = self.load_checkpoint(resume_from, optimizer, scheduler)
+            log_message(f"Resuming from {resume_from}: epoch {start_epoch} and global step {global_step}")
+        
+        # best checkpoint가 있으면 값 불러오기
+        if os.path.exists(os.path.join(save_dir, "checkpoint-best")):
+            log_message(f"Found best checkpoint in {save_dir}, loading best validation metrics")
+            _, _, best_checkpoint_accuracy, best_checkpoint_loss = self.load_checkpoint(
+                os.path.join(save_dir, "checkpoint-best"), None, None
+            )
+            # 저장된 값이 현재 값보다 좋으면 업데이트
+            if best_checkpoint_accuracy > best_val_accuracy:
+                best_val_accuracy = best_checkpoint_accuracy
+                log_message(f"Loaded best validation accuracy: {best_val_accuracy:.4f}")
+            if best_checkpoint_loss < best_val_loss:
+                best_val_loss = best_checkpoint_loss
+                log_message(f"Loaded best validation loss: {best_val_loss:.4f}")
         
         # CSV 형식의 메트릭 로그 파일 생성
         metrics_log_file = os.path.join(save_dir, "metrics_log.txt")
@@ -407,6 +447,7 @@ class ARCSolver:
                 input_ids = batch['input_ids'].to(self.device)
                 target_ids = batch['target_ids'].to(self.device)
                 loss = self.seq2seq_loss(input_ids, target_ids) / steps_accum
+                # loss = self.seq2seq_loss_with_regularization(input_ids, target_ids, epoch=epoch) / steps_accum
                 
                 # Backpropagation
                 loss.backward()
@@ -427,7 +468,7 @@ class ARCSolver:
                     log_message(f"[Epoch {epoch+1}] step {step} loss {loss.item():.4f} lr {current_lr:.6f}")
 
                 # Validation check - 첫 번째 에폭에서는 검증 건너뛰기
-                if val_loader is not None and global_step % val_steps == 0 and epoch >= 1:
+                if val_loader is not None and global_step % val_steps == 0 and epoch >= 0:
                     val_loss, val_accuracy = self.validate(val_loader)
                     log_message(f"[Validation] global_step {global_step} loss {val_loss:.4f} accuracy {val_accuracy:.4f}")
                     
@@ -454,7 +495,7 @@ class ARCSolver:
                     if improved:
                         log_message(", ".join(improvement_message))
                         # Save best model
-                        self.save_model(best_model_path, optimizer, scheduler, epoch, global_step)
+                        self.save_model(best_model_path, optimizer, scheduler, epoch, global_step, val_accuracy, val_loss)
                         patience_counter = 0
                     else:
                         patience_counter += 1
@@ -472,7 +513,7 @@ class ARCSolver:
 
                 # Save checkpoint every 5000 steps
                 if global_step % 5000 == 0:
-                    self.save_model(os.path.join(save_dir, f"checkpoint-{global_step}"), optimizer, scheduler, epoch, global_step)
+                    self.save_model(os.path.join(save_dir, f"checkpoint-{global_step}"), optimizer, scheduler, epoch, global_step, best_val_accuracy, best_val_loss)
             
             # Print average loss for the epoch
             avg_epoch_loss = total_loss/len(loader)
@@ -486,7 +527,7 @@ class ARCSolver:
         log_message("===== Training completed =====")
 
         # save final model
-        self.save_model(os.path.join(save_dir, "checkpoint-final"), optimizer, scheduler, epoch, global_step)
+        self.save_model(os.path.join(save_dir, "checkpoint-final"), optimizer, scheduler, epoch, global_step, best_val_accuracy, best_val_loss)
 
     def validate(self, val_loader):
         """
@@ -600,13 +641,16 @@ class ARCSolver:
         # 3) epoch / global_step restore (optional)
         state_path = os.path.join(path, "training_state.json")
         start_epoch, start_step = 0, 0
+        val_accuracy, val_loss = 0, float('inf')
         if os.path.isfile(state_path):
             st = json.load(open(state_path))
             start_epoch = st.get('epoch', 0)
             start_step  = st.get('global_step', 0)
-        return start_epoch, start_step
+            val_accuracy = st.get('val_accuracy', 0)
+            val_loss = st.get('val_loss', float('inf'))
+        return start_epoch, start_step, val_accuracy, val_loss
 
-    def save_model(self, path=None, optimizer=None, scheduler=None, epoch=None, global_step=None):
+    def save_model(self, path=None, optimizer=None, scheduler=None, epoch=None, global_step=None, val_accuracy=None, val_loss=None):
         """
         Save the model and its configuration
         """
@@ -626,6 +670,10 @@ class ARCSolver:
             state['epoch'] = epoch
         if global_step is not None:
             state['global_step'] = global_step
+        if val_accuracy is not None:
+            state['val_accuracy'] = val_accuracy
+        if val_loss is not None:
+            state['val_loss'] = val_loss
         if state:
             with open(os.path.join(path, "training_state.json"), "w") as f:
                 json.dump(state, f, indent=2)
@@ -676,8 +724,8 @@ class ARCSolver:
         config = GenerationConfig(
             do_sample=True, 
             temperature=0.7, 
-            top_p=0.6, # 0.8
-            top_k=10, # 20
+            top_p=0.8,
+            top_k=20,
             bos_token_id=151643,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
