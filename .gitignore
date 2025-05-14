@@ -42,7 +42,4 @@ augmented_dataset/
 validation_dataset/
 
 # artifacts
-artifacts/**/*.pth
-artifacts/**/*.bin
-artifacts/**/optimizer.pth
-artifacts/**/scheduler.pth
+artifacts/**/checkpoint-*
