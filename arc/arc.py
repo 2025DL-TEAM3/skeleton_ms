@@ -182,31 +182,26 @@ class ARCSolver:
         )
 
     def format_prompt(self, datapoint):
-        # 1) Prepare core user content
+        # Build example block
         n = len(datapoint['train'])
         plural = 's' if n != 1 else ''
-        header = user_message_template1.format(n=n, plural=plural)
-
-        # Build example block
         examples_block = ''
         for i, ex in enumerate(datapoint['train'], start=1):
             examples_block += f"Example {i} Input:\n"
             examples_block += self.grid_to_str(ex['input'])
             examples_block += f"Example {i} Output:\n"
             examples_block += self.grid_to_str(ex['output'])
+        template1 = user_message_template1.format(n=n, plural=plural, examples=examples_block)
 
         # Build test input block
-        test_input = datapoint['test'][0]['input']
-        test_block = (
-            f"{user_message_template2}\n"
-            f"Test Input:\n" + self.grid_to_str(test_input)
-        )
+        test_input = f"Test Input:\n{self.grid_to_str(datapoint['test'][0]['input'])}"
+        template2 = user_message_template2.format(test_grid=test_input)
 
-        # 2) Assemble messages for chat template
+        # Assemble messages for chat template
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": header + "\n" + examples_block},
-            {"role": "user",   "content": test_block},
+            {"role": "user",   "content": template1},
+            {"role": "user",   "content": template2},
             {"role": "user",   "content": user_message_template3}
         ]
 
