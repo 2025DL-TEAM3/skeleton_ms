@@ -39,7 +39,7 @@ def main():
     batch_size = 2
     lr = 5e-5
     num_epochs = 10
-    steps_per_file = 50
+    steps_per_file = 50 # should be multiple of batch_size
     steps_accum = 4
     warmup_rate = 0.1
 

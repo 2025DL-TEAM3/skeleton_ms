@@ -155,3 +155,28 @@ class ARCDataset(Dataset):
         tgt_ids = torch.tensor(tgt_tokens, dtype=torch.long)
 
         return {"input_ids": inp_ids, "target_ids": tgt_ids}
+
+class FileBatchSampler(torch.utils.data.Sampler):
+    """
+    매 배치가 동일한 JSON 파일에서 온 samples만 포함하도록 하는 BatchSampler.
+    """
+    def __init__(self, dataset, batch_size):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.steps_per_file = dataset.steps_per_file
+        self.num_files = len(dataset.examples)
+
+    def __iter__(self):
+        file_indices = list(range(self.num_files))
+        random.shuffle(file_indices)
+        for f in file_indices:
+            start = f * self.steps_per_file
+            end   = start + self.steps_per_file
+            idxs  = list(range(start, end))
+            random.shuffle(idxs)
+            for i in range(0, len(idxs), self.batch_size):
+                yield idxs[i : i + self.batch_size]
+
+    def __len__(self):
+        per_file = (self.steps_per_file + self.batch_size - 1) // self.batch_size
+        return self.num_files * per_file

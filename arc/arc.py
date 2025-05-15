@@ -15,7 +15,7 @@ import numpy as np
 import json
 
 from .utils import system_prompt, user_message_template1, user_message_template2, user_message_template3
-from .dataset import ARCDataset
+from .dataset import ARCDataset, FileBatchSampler
 from transformers import BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer, get_linear_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, PeftConfig, PeftModel
 from torch.utils.data import DataLoader
@@ -220,7 +220,7 @@ class ARCSolver:
 
         return {
             'input_ids': input_ids,
-            'input': test_input,
+            'input': datapoint['test'][0]['input'],
             'train': datapoint['train'],
         }
 
@@ -366,7 +366,8 @@ class ARCSolver:
         
         # Initialize dataset and data loader
         dataset = ARCDataset(train_dataset, self.tokenizer, self, steps_per_file=steps_per_file, is_validation=False)
-        loader = DataLoader(dataset, batch_size, shuffle=True, pin_memory=True, collate_fn=self.dynamic_collate)
+        batch_sampler = FileBatchSampler(dataset, batch_size)
+        loader = DataLoader(dataset, batch_sampler=batch_sampler, pin_memory=True, collate_fn=self.dynamic_collate)
 
         # Initialize validation dataset and data loader if provided
         val_loader = None
