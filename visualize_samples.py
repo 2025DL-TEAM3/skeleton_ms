@@ -5,109 +5,139 @@ import random
 import os
 from pathlib import Path
 import numpy as np
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.units import inch
+from PIL import Image, ImageDraw, ImageFont
+import io
 
-def render_grid(grid):
+def create_grid_image(grid, cell_size=20):
     """
-    그리드를 시각적으로 출력합니다.
+    그리드를 이미지로 변환합니다.
     """
     color_map = {
-        0: '\033[97m⬜\033[0m',  # 하얀색
-        1: '\033[91m🟥\033[0m',  # 빨간색
-        2: '\033[92m🟩\033[0m',  # 초록색
-        3: '\033[94m🟦\033[0m',  # 파란색
-        4: '\033[93m🟨\033[0m',  # 노란색
-        5: '\033[95m🟪\033[0m',  # 보라색
-        6: '\033[96m🟦\033[0m',  # 청록색
-        7: '\033[90m⬛\033[0m',  # 검은색
-        8: '\033[37m⬜\033[0m',  # 회색
-        9: '\033[33m🟧\033[0m',  # 주황색
+        0: (255, 255, 255),  # 하얀색
+        1: (255, 0, 0),      # 빨간색
+        2: (0, 255, 0),      # 초록색
+        3: (0, 0, 255),      # 파란색
+        4: (255, 255, 0),    # 노란색
+        5: (128, 0, 128),    # 보라색
+        6: (0, 255, 255),    # 청록색
+        7: (0, 0, 0),        # 검은색
+        8: (128, 128, 128),  # 회색
+        9: (255, 165, 0),    # 주황색
     }
     
-    for row in grid:
-        print(''.join([color_map.get(cell, f'{cell:2}') for cell in row]))
+    height = len(grid)
+    width = len(grid[0])
+    
+    img = Image.new('RGB', (width * cell_size, height * cell_size), 'white')
+    draw = ImageDraw.Draw(img)
+    
+    for y, row in enumerate(grid):
+        for x, cell in enumerate(grid[y]):
+            color = color_map.get(cell, (255, 255, 255))
+            draw.rectangle(
+                [x * cell_size, y * cell_size, 
+                 (x + 1) * cell_size, (y + 1) * cell_size],
+                fill=color,
+                outline='black'
+            )
+    
+    return img
+
+def create_visualization_row(examples, cell_size=20):
+    """
+    4개의 예제를 한 줄로 시각화합니다.
+    """
+    images = []
+    for example in examples:
+        input_img = create_grid_image(example["input"], cell_size)
+        output_img = create_grid_image(example["output"], cell_size)
+        
+        # 입력과 출력 이미지를 가로로 연결
+        combined_width = input_img.width + output_img.width
+        combined_height = max(input_img.height, output_img.height)
+        combined_img = Image.new('RGB', (combined_width, combined_height), 'white')
+        combined_img.paste(input_img, (0, 0))
+        combined_img.paste(output_img, (input_img.width, 0))
+        images.append(combined_img)
+    
+    # 4개의 이미지를 가로로 연결
+    total_width = sum(img.width for img in images)
+    max_height = max(img.height for img in images)
+    row_img = Image.new('RGB', (total_width, max_height), 'white')
+    
+    x_offset = 0
+    for img in images:
+        row_img.paste(img, (x_offset, 0))
+        x_offset += img.width
+    
+    return row_img
 
 def main():
-    # 명령행 인자 파싱
     parser = argparse.ArgumentParser(description='ARC 데이터셋 샘플 시각화')
-    parser.add_argument('--dataset', type=str, required=True, help='데이터셋 디렉토리 또는 JSON 파일 경로')
-    parser.add_argument('--samples', type=int, default=10, help='시각화할 샘플 수')
-    parser.add_argument('--seed', type=int, default=42, help='랜덤 시드')
+    parser.add_argument('--dataset', type=str, required=True, help='데이터셋 디렉토리 경로')
+    parser.add_argument('--output', type=str, default='visualization.pdf', help='출력 PDF 파일 경로')
     args = parser.parse_args()
     
-    # 랜덤 시드 설정
-    random.seed(args.seed)
-    np.random.seed(args.seed)
+    # JSON 파일 목록 가져오기
+    json_files = glob.glob(os.path.join(args.dataset, "*.json"))
+    if not json_files:
+        print(f"경고: {args.dataset}에서 JSON 파일을 찾을 수 없습니다.")
+        return
     
-    # 입력 경로가 디렉토리인지 파일인지 확인
-    dataset_path = Path(args.dataset)
-    all_examples = []
+    print(f"총 {len(json_files)}개의 JSON 파일을 찾았습니다.")
     
-    if dataset_path.is_dir():
-        # 디렉토리 내의 모든 JSON 파일을 찾음
-        json_files = glob.glob(os.path.join(args.dataset, "*.json"))
-        if not json_files:
-            print(f"경고: {args.dataset}에서 JSON 파일을 찾을 수 없습니다.")
-            return
-        
-        print(f"총 {len(json_files)}개의 JSON 파일을 찾았습니다.")
-        
-        # 각 파일에서 예제를 로드하고 합침
-        for json_file in json_files:
-            try:
-                with open(json_file, 'r') as f:
-                    examples = json.load(f)
-                
-                if isinstance(examples, list):
-                    all_examples.extend(examples)
-                    print(f"{Path(json_file).name}에서 {len(examples)}개의 예제를 로드했습니다.")
-                else:
-                    print(f"경고: {Path(json_file).name}의 형식이 올바르지 않습니다. 리스트가 아닙니다.")
-            except Exception as e:
-                print(f"오류: {Path(json_file).name} 처리 중 예외 발생: {str(e)}")
+    # PDF 생성
+    c = canvas.Canvas(args.output, pagesize=landscape(A4))
+    page_width, page_height = landscape(A4)
     
-    elif dataset_path.is_file() and dataset_path.suffix == '.json':
-        # 단일 JSON 파일을 처리
+    y_position = page_height - 50  # 시작 위치
+    
+    for json_file in json_files:
         try:
-            with open(dataset_path, 'r') as f:
+            with open(json_file, 'r') as f:
                 examples = json.load(f)
             
-            if isinstance(examples, list):
-                all_examples = examples
-                print(f"{dataset_path.name}에서 {len(examples)}개의 예제를 로드했습니다.")
+            if not isinstance(examples, list):
+                print(f"경고: {Path(json_file).name}의 형식이 올바르지 않습니다.")
+                continue
+            
+            # 4개의 랜덤 샘플 선택
+            if len(examples) >= 4:
+                selected_examples = random.sample(examples, 4)
             else:
-                print(f"경고: {dataset_path.name}의 형식이 올바르지 않습니다. 리스트가 아닙니다.")
-                return
+                selected_examples = examples
+                print(f"경고: {Path(json_file).name}에 4개 미만의 예제가 있습니다.")
+            
+            # 시각화 행 생성
+            row_img = create_visualization_row(selected_examples)
+            
+            # 이미지를 PDF에 추가
+            img_data = io.BytesIO()
+            row_img.save(img_data, format='PNG')
+            img_data.seek(0)
+            
+            # 이미지 크기 조정
+            img_width = min(page_width - 100, row_img.width)
+            img_height = img_width * row_img.height / row_img.width
+            
+            c.drawImage(img_data, 50, y_position - img_height, width=img_width, height=img_height)
+            c.drawString(50, y_position + 10, f"File: {Path(json_file).name}")
+            
+            y_position -= img_height + 50
+            
+            # 새 페이지 필요시
+            if y_position < 50:
+                c.showPage()
+                y_position = page_height - 50
+            
         except Exception as e:
-            print(f"오류: {dataset_path.name} 처리 중 예외 발생: {str(e)}")
-            return
-    else:
-        print(f"오류: {args.dataset}는 유효한 디렉토리 또는 JSON 파일이 아닙니다.")
-        return
+            print(f"오류: {Path(json_file).name} 처리 중 예외 발생: {str(e)}")
     
-    # 전체 예제 수 확인
-    total_examples = len(all_examples)
-    if total_examples == 0:
-        print("오류: 로드된 예제가 없습니다.")
-        return
-    
-    print(f"\n총 {total_examples}개의 예제를 로드했습니다.")
-    
-    # 샘플 수 조정
-    num_samples = min(args.samples, total_examples)
-    
-    # 무작위로 샘플 선택
-    selected_examples = random.sample(all_examples, num_samples)
-    
-    # 선택된 샘플 시각화
-    print(f"\n선택된 {num_samples}개의 샘플을 시각화합니다:\n")
-    
-    for i, example in enumerate(selected_examples):
-        print(f"샘플 {i+1}/{num_samples}:")
-        print("입력(Input):")
-        render_grid(example["input"])
-        print("\n출력(Output):")
-        render_grid(example["output"])
-        print("\n" + "="*50 + "\n")
+    c.save()
+    print(f"시각화가 {args.output}에 저장되었습니다.")
 
 if __name__ == "__main__":
     main() 
