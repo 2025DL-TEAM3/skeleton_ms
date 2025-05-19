@@ -13,6 +13,7 @@ import torch
 from typing import List
 import numpy as np
 import json
+import random
 
 from .utils import system_prompt, user_message_template1, user_message_template2, user_message_template3
 from .dataset import ARCDataset, FileBatchSampler
@@ -200,9 +201,7 @@ class ARCSolver:
         # Assemble messages for chat template
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": template1},
-            {"role": "user",   "content": template2},
-            {"role": "user",   "content": user_message_template3}
+            {"role": "user",   "content": template1 + "\n" + template2 + "\n" + user_message_template3}
         ]
 
         # 3) Apply chat template without tokenizing
@@ -310,7 +309,7 @@ class ARCSolver:
 
     def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, 
                save_dir: str = 'artifacts/qwen3-4b-lora', resume_from: str = None, validation_dataset=None, 
-               patience=10, val_steps=1000, val_seed=42, max_val_files=50, val_steps_per_file=2, val_batch_size=4):
+               patience=10, val_steps=1000, fixed_seed=42, max_val_files=50, val_steps_per_file=2, val_batch_size=4):
         """
         Train the model using LoRA fine-tuning.
         
@@ -327,7 +326,7 @@ class ARCSolver:
             validation_dataset: Dataset for validation during training
             patience (int): Number of validation checks without improvement before early stopping
             val_steps (int): Number of steps between validation checks
-            val_seed (int): Random seed for validation sampling
+            fixed_seed (int): Random seed for validation sampling
             max_val_files (int): Maximum number of files to use for validation
             val_steps_per_file (int): Steps per file for validation (less than training)
             val_batch_size (int): Batch size for validation
@@ -366,21 +365,7 @@ class ARCSolver:
         
         # Initialize dataset and data loader
         dataset = ARCDataset(train_dataset, self.tokenizer, self, steps_per_file=steps_per_file, is_validation=False)
-        batch_sampler = FileBatchSampler(dataset, batch_size)
-        loader = DataLoader(dataset, batch_sampler=batch_sampler, pin_memory=True, collate_fn=self.dynamic_collate)
-
-        # Initialize validation dataset and data loader if provided
-        val_loader = None
-        if validation_dataset is not None:
-            val_dataset = ARCDataset(validation_dataset, self.tokenizer, self, 
-                                    steps_per_file=val_steps_per_file,  # 검증에는 더 적은 스텝 사용
-                                    is_validation=True,  # 결정적 샘플링 활성화
-                                    seed=val_seed,       # 고정된 시드 사용
-                                    max_val_files=max_val_files)  # 검증에 사용할 최대 파일 수
-            val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, pin_memory=True, collate_fn=self.dynamic_collate)
-            log_message(f"Validation dataset loaded with {len(val_dataset)} steps, using seed {val_seed}, max files {max_val_files}, steps/file {val_steps_per_file}, batch size {val_batch_size}")
-            log_message(f"Total validation batches: {len(val_loader)}")
-
+        
         # Initialize optimizer with specified learning rate
         optimizer = AdamW(self.model.parameters(), lr=lr)
 
@@ -425,6 +410,37 @@ class ARCSolver:
                 best_val_loss = best_checkpoint_loss
                 log_message(f"Loaded best validation loss: {best_val_loss:.4f}")
         
+        # 한 에폭당 배치 수 계산
+        per_file = (steps_per_file + batch_size - 1) // batch_size
+        total_batches_per_epoch = len(dataset.examples) * per_file
+        
+        # resume 시 skip할 배치 수 계산 (에폭 수 반영)
+        skip_batches = 0
+        if resume_from and global_step > 0:
+            skip_batches = (start_epoch * total_batches_per_epoch) + (global_step % total_batches_per_epoch)
+            log_message(f"Resuming from batch {skip_batches} (epoch {start_epoch}, step {global_step})")
+        
+        # batch sampler 생성
+        batch_sampler = FileBatchSampler(
+            dataset, 
+            batch_size,
+            seed=fixed_seed + start_epoch if resume_from else None,  # resume 시에만 seed 설정
+            skip_batches=skip_batches
+        )
+        loader = DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=self.dynamic_collate)
+
+        # Initialize validation dataset and data loader if provided
+        val_loader = None
+        if validation_dataset is not None:
+            val_dataset = ARCDataset(validation_dataset, self.tokenizer, self, 
+                                    steps_per_file=val_steps_per_file,  # 검증에는 더 적은 스텝 사용
+                                    is_validation=True,  # 결정적 샘플링 활성화
+                                    seed=fixed_seed,       # 고정된 시드 사용
+                                    max_val_files=max_val_files)  # 검증에 사용할 최대 파일 수
+            val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, collate_fn=self.dynamic_collate)
+            log_message(f"Validation dataset loaded with {len(val_dataset)} steps, using seed {fixed_seed}, max files {max_val_files}, steps/file {val_steps_per_file}, batch size {val_batch_size}")
+            log_message(f"Total validation batches: {len(val_loader)}")
+
         # CSV 형식의 메트릭 로그 파일 생성
         metrics_log_file = os.path.join(save_dir, "metrics_log.txt")
         with open(metrics_log_file, 'w', encoding='utf-8') as f:
@@ -434,6 +450,14 @@ class ARCSolver:
         self.model.train()
         # Training loop
         for epoch in range(start_epoch, num_epochs):
+            # 새로운 에폭 시작 시 skip_batches 리셋
+            if epoch > start_epoch:
+                batch_sampler.reset_skip_batches()
+                # 새로운 에폭의 시드 설정
+                random.seed(fixed_seed + epoch)
+                batch_sampler.seed = fixed_seed + epoch
+                log_message(f"Starting epoch {epoch} with seed {fixed_seed + epoch}")
+            
             total_loss = 0
             # steps = len(dataset) / batch_size
             for step, batch in enumerate(loader):
@@ -507,13 +531,18 @@ class ARCSolver:
                     # Set model back to training mode after validation
                     self.model.train()
 
-                # Save checkpoint every 5000 steps
-                if global_step % 5000 == 0:
+                # Save checkpoint every 20000 steps
+                if global_step % 20000 == 0:
                     self.save_model(os.path.join(save_dir, f"checkpoint-{global_step}"), optimizer, scheduler, epoch, global_step, best_val_accuracy, best_val_loss)
-            
+
+                # 배치 단위 메모리 정리
+                del input_ids, target_ids, loss
             # Print average loss for the epoch
             avg_epoch_loss = total_loss/len(loader)
             log_message(f"Epoch {epoch+1} avg loss {avg_epoch_loss:.4f}")
+
+            # 에폭 완료 후 캐시 정리
+            torch.cuda.empty_cache()
             
             # 에폭 완료 후 메트릭 로깅 - train loss만 기록
             with open(metrics_log_file, 'a', encoding='utf-8') as f:
@@ -614,6 +643,9 @@ class ARCSolver:
                     except (ValueError, TypeError) as e:
                         # 배열 변환 실패 시 0점 처리
                         correct_predictions += 0.0
+
+                # 배치 단위 메모리 정리
+                del input_ids, target_ids, outputs, attn_mask
         
         avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
         accuracy = correct_predictions / total_samples if total_samples > 0 else 0

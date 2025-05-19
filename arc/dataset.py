@@ -65,9 +65,6 @@ class ARCDataset(Dataset):
         """
         검증 데이터셋인 경우 미리 샘플을 결정적으로 준비합니다.
         """
-        # 고정된 시드 사용
-        random.seed(self.seed)
-        
         self.validation_samples = []
         
         # 파일이 max_val_files보다 많으면 랜덤하게 선택
@@ -95,9 +92,6 @@ class ARCDataset(Dataset):
                     'file_idx': file_idx,
                     'selected_examples': selected_examples
                 })
-        
-        # 시드 초기화 (다른 랜덤 작업에 영향 없도록)
-        random.seed()
         
         print(f"Prepared {len(self.validation_samples)} fixed validation samples from {len(file_indices)} files")
 
@@ -160,13 +154,25 @@ class FileBatchSampler(torch.utils.data.Sampler):
     """
     매 배치가 동일한 JSON 파일에서 온 samples만 포함하도록 하는 BatchSampler.
     """
-    def __init__(self, dataset, batch_size):
+    def __init__(self, dataset, batch_size, seed=None, skip_batches=0):
         self.dataset = dataset
         self.batch_size = batch_size
         self.steps_per_file = dataset.steps_per_file
         self.num_files = len(dataset.examples)
+        self.seed = seed
+        self.skip_batches = skip_batches
+
+    def reset_skip_batches(self):
+        """새로운 에폭 시작 시 skip_batches를 리셋"""
+        self.skip_batches = 0
 
     def __iter__(self):
+        # 시드가 있으면 초기화
+        if self.seed is not None:
+            random.seed(self.seed)
+
+        # 파일 단위로 모든 배치 인덱스 리스트 생성
+        batch_list = []
         file_indices = list(range(self.num_files))
         random.shuffle(file_indices)
         for f in file_indices:
@@ -175,8 +181,12 @@ class FileBatchSampler(torch.utils.data.Sampler):
             idxs  = list(range(start, end))
             random.shuffle(idxs)
             for i in range(0, len(idxs), self.batch_size):
-                yield idxs[i : i + self.batch_size]
+                batch_list.append(idxs[i : i + self.batch_size])
+
+        # 이미 본 배치 건너뛰기
+        for batch in batch_list[self.skip_batches:]:
+            yield batch
 
     def __len__(self):
         per_file = (self.steps_per_file + self.batch_size - 1) // self.batch_size
-        return self.num_files * per_file
+        return self.num_files * per_file - self.skip_batches

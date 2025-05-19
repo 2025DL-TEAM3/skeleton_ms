@@ -33,24 +33,23 @@
 # system prompt
 system_prompt = (
     "You are an expert at solving puzzles from the Abstraction and Reasoning Corpus (ARC). "
-    "From a few input/output examples, infer the transformation rule "
+    "From three input/output examples, infer the transformation rule "
     "and apply it to a new test grid."
 )
 
 # user prompt 1: examples
 user_message_template1 = (
-    "Here are {n} example pair{plural}:\n"
+    "Here are {n} example input and output pair{plural} from which you should learn the underlying rule to later predict the output for the given test input:\n"
     "{examples}\n"
-    "Observe how each input becomes its output."
 )
 
 # user prompt 2: test input
 user_message_template2 = (
-    "Now apply that rule to this test input grid:\n"
-    "{test_grid}"
+    "Now, solve the following puzzle based on its input grid by applying the rules you have learned from the training data:"
+    "{test_grid}\n"
 )
 
 # user prompt 3: output format
 user_message_template3 = (
-    "Only return the output grid (rows as digit sequences; each ending with a newline; no extra text or spaces):"
+    "What is the output grid? Please provide only the grid where each row is a sequence of digits, where each row ends on a new line, and no extra text or spaces:"
 )

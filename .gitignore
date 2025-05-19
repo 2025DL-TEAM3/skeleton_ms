@@ -40,6 +40,9 @@ venv.bak/
 dataset/
 augmented_dataset/
 validation_dataset/
+dataset_*/
+bigger_dataset/
+big_dataset/
 
 # artifacts
 artifacts/**/checkpoint-*
