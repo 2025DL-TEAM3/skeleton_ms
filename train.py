@@ -29,7 +29,7 @@ def main():
     print("Loading and splitting dataset...")
     data_files = sorted(glob.glob(f"{args.dataset}/*.json"))  # 정렬된 순서로 파일 목록 가져오기
     random.shuffle(data_files)  # 고정된 시드로 섞기
-    split_idx = int(len(data_files) * 0.95)
+    split_idx = int(len(data_files) * 0.9)
     train_files = data_files[:split_idx]
     val_files = data_files[split_idx:]
     print(f"Train files: {len(train_files)}, Validation files: {len(val_files)}")
@@ -48,18 +48,18 @@ def main():
     # configuration
     batch_size = 1
     lr = 5e-5
-    num_epochs = 4
-    steps_per_file = 50 # should be multiple of batch_size
+    num_epochs = 5
+    steps_per_file = 30 # should be multiple of batch_size
     steps_accum = 4
     warmup_rate = 0.1
     fixed_seed = args.seed
 
     # validation configuration
     patience = 10
-    val_steps = 20000
+    val_steps = 5000
     val_steps_per_file = 1
-    max_val_files = 128
-    val_batch_size = 4
+    max_val_files = 100
+    val_batch_size = 2
     
     # 모델 학습
     print("Starting training...")

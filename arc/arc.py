@@ -478,7 +478,7 @@ class ARCSolver:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                     optimizer.step()  # Update model parameters
                     scheduler.step()  # Update learning rate
-                    optimizer.zero_grad()  # Clear gradients
+                    optimizer.zero_grad(set_to_none=True)  # Clear gradients
                 
                 # Track and display training progress
                 total_loss += loss.item()
@@ -531,8 +531,8 @@ class ARCSolver:
                     # Set model back to training mode after validation
                     self.model.train()
 
-                # Save checkpoint every 20000 steps
-                if global_step % 20000 == 0:
+                # Save checkpoint every 5000 steps
+                if global_step % 5000 == 0:
                     self.save_model(os.path.join(save_dir, f"checkpoint-{global_step}"), optimizer, scheduler, epoch, global_step, best_val_accuracy, best_val_loss)
 
                 # 배치 단위 메모리 정리
