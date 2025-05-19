@@ -490,6 +490,7 @@ class ARCSolver:
                 # Validation check - 첫 번째 에폭에서는 검증 건너뛰기
                 if val_loader is not None and global_step % val_steps == 0 and epoch >= 0:
                     val_loss, val_accuracy = self.validate(val_loader)
+                    torch.cuda.empty_cache() # 메모리 정리
                     log_message(f"[Validation] global_step {global_step} loss {val_loss:.4f} accuracy {val_accuracy:.4f}")
                     
                     # 메트릭 로깅
@@ -574,6 +575,7 @@ class ARCSolver:
         # 검증 시에는 Greedy decoding으로 일관된 출력 생성
         val_config = GenerationConfig(
             do_sample=False,  # 샘플링 없이 확정적 생성
+            use_cache=False,  # 캐시 사용 비활성화
             bos_token_id=151643,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
@@ -645,7 +647,7 @@ class ARCSolver:
                         correct_predictions += 0.0
 
                 # 배치 단위 메모리 정리
-                del input_ids, target_ids, outputs, attn_mask
+                del input_ids, target_ids, outputs, attn_mask, loss
         
         avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
         accuracy = correct_predictions / total_samples if total_samples > 0 else 0
