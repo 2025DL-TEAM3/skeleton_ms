@@ -43,6 +43,7 @@ validation_dataset/
 dataset_*/
 bigger_dataset/
 big_dataset/
+small_dataset/
 
 # artifacts
 artifacts/**/checkpoint-*
