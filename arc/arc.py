@@ -157,6 +157,9 @@ class ARCSolver:
 
         # 2) 그리드 토큰 직접 삽입
         grid_ids = []
+        grid_ids += self.tokenizer.encode(
+            "<|im_start|>user\n", add_special_tokens=False
+        )
         for i, ex in enumerate(datapoint['train'], start=1):
             grid_ids += self.tokenizer.encode(f"Example {i} Input:\n", add_special_tokens=False)
             grid_ids += self.format_grid(ex['input'])
@@ -165,6 +168,9 @@ class ARCSolver:
         grid_ids += self.tokenizer.encode(user_message_template2, add_special_tokens=False)
         grid_ids += self.tokenizer.encode("Test Input:\n", add_special_tokens=False)
         grid_ids += self.format_grid(datapoint['test'][0]['input'])
+        grid_ids += self.tokenizer.encode(
+            "<|im_end|>\n", add_special_tokens=False
+        )
 
         # 3) 어시스턴트 생성 프롬프트
         suffix_ids = self.tokenizer.apply_chat_template(
