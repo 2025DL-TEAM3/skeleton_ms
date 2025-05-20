@@ -41,8 +41,8 @@ dataset/
 augmented_dataset/
 validation_dataset/
 dataset_*/
-bigger_dataset/
 big_dataset/
+mid_dataset/
 small_dataset/
 
 # artifacts
