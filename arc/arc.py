@@ -36,7 +36,7 @@ class ARCSolver:
         """
         config_path = "artifacts/config/config.yml"
         model_id = "Qwen/Qwen3-4B"
-        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         
         # 허깅페이스 캐시 디렉토리 설정
         cache_dir = "/2025pdp/.cache"
@@ -141,49 +141,39 @@ class ARCSolver:
             prompt (dict): dictionary that contains input ids and additional informations
         """
 
-        # 1) 시스템 + 유저 헤더
-        prefix_ids = self.tokenizer.apply_chat_template(
-            [
-                {"role":"system", "content": system_prompt},
-                {"role":"user",   "content": user_message_template1.format(
-                                    n=len(datapoint['train']),
-                                    plural=('s' if len(datapoint['train'])!=1 else '')
-                                )}
-            ],
-            tokenize=True,
-            add_special_tokens=False,
-            add_generation_prompt=False
-        )
+        # 1) system prompt
+        token_ids = []
+        system_block = f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+        token_ids += self.tokenizer.encode(system_block, add_special_tokens=False)
 
-        # 2) 그리드 토큰 직접 삽입
-        grid_ids = []
-        grid_ids += self.tokenizer.encode(
-            "<|im_start|>user\n", add_special_tokens=False
-        )
+        # 2) user prompt 1
+        user_block_1 = f"<|im_start|>user\n{user_message_template1.format(n=len(datapoint['train']), plural=('s' if len(datapoint['train'])!=1 else ''))}\n"
+        token_ids += self.tokenizer.encode(user_block_1, add_special_tokens=False)
+
+        # 3) examples
         for i, ex in enumerate(datapoint['train'], start=1):
-            grid_ids += self.tokenizer.encode(f"Example {i} Input:\n", add_special_tokens=False)
-            grid_ids += self.format_grid(ex['input'])
-            grid_ids += self.tokenizer.encode(f"Example {i} Output:\n", add_special_tokens=False)
-            grid_ids += self.format_grid(ex['output'])
-        grid_ids += self.tokenizer.encode(user_message_template2, add_special_tokens=False)
-        grid_ids += self.tokenizer.encode("Test Input:\n", add_special_tokens=False)
-        grid_ids += self.format_grid(datapoint['test'][0]['input'])
-        grid_ids += self.tokenizer.encode(
-            "<|im_end|>\n", add_special_tokens=False
-        )
+            token_ids += self.tokenizer.encode(f"Example {i} Input:\n", add_special_tokens=False)
+            token_ids += self.format_grid(ex['input'])
+            token_ids += self.tokenizer.encode(f"Example {i} Output:\n", add_special_tokens=False)
+            token_ids += self.format_grid(ex['output'])
 
-        # 3) 어시스턴트 생성 프롬프트
-        suffix_ids = self.tokenizer.apply_chat_template(
-            [
-                {"role":"user", "content": user_message_template3}
-            ],
-            tokenize=True,
-            add_special_tokens=False,
-            add_generation_prompt=True
-        )
+        # 4) user prompt 2
+        user_block_2 = f"\n{user_message_template2}\n"
+        token_ids += self.tokenizer.encode(user_block_2, add_special_tokens=False)
 
-        # 4) 최종 프롬프트 생성
-        all_ids = prefix_ids + grid_ids + suffix_ids
+        # 5) test input
+        token_ids += self.tokenizer.encode("Test Input:\n", add_special_tokens=False)
+        token_ids += self.format_grid(datapoint['test'][0]['input'])
+
+        # 6) user prompt 3
+        user_block_3 = f"\n{user_message_template3}<|im_end|>\n"
+        token_ids += self.tokenizer.encode(user_block_3, add_special_tokens=False)
+
+        # 7) assistant response
+        token_ids += self.tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
+
+        # 8) 최종 프롬프트 생성
+        all_ids = token_ids
         tokens = torch.tensor(all_ids, dtype=torch.long, device=self.device)
 
         return {
@@ -434,7 +424,7 @@ class ARCSolver:
         # resume 시 skip할 배치 수 계산 (에폭 수 반영)
         skip_batches = 0
         if resume_from and global_step > 0:
-            skip_batches = (start_epoch * total_batches_per_epoch) + (global_step % total_batches_per_epoch)
+            skip_batches = global_step % total_batches_per_epoch
             log_message(f"Resuming from batch {skip_batches} (epoch {start_epoch}, step {global_step})")
         
         # batch sampler 생성
@@ -549,8 +539,8 @@ class ARCSolver:
                     # Set model back to training mode after validation
                     self.model.train()
 
-                # Save checkpoint every 5000 steps
-                if global_step % 5000 == 0:
+                # Save checkpoint every 10000 steps
+                if global_step % 10000 == 0:
                     self.save_model(os.path.join(save_dir, f"checkpoint-{global_step}"), optimizer, scheduler, epoch, global_step, best_val_accuracy, best_val_loss)
 
                 # 배치 단위 메모리 정리
