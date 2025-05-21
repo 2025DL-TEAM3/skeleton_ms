@@ -112,123 +112,123 @@ class ARCSolver:
             grid.append(row.copy())
         return grid
 
-    def format_grid(self, grid: List[List[int]]):
-        """
-        Format 2D grid into LLM input tokens
+    # def format_grid(self, grid: List[List[int]]):
+    #     """
+    #     Format 2D grid into LLM input tokens
 
-        Args:
-            grid (List[List[int]]): 2D grid
+    #     Args:
+    #         grid (List[List[int]]): 2D grid
 
-        Returns:
-            ids (List[int]): Token list for LLM
-        """
-        ids = []
+    #     Returns:
+    #         ids (List[int]): Token list for LLM
+    #     """
+    #     ids = []
 
-        for row in grid:
-            for col in row:
-                ids.append(self.pixel_ids[col])
-            ids.append(self.sep)  # 한 행 끝마다 줄바꿈
-        return ids
-
-    def format_prompt(self, datapoint):
-        """
-        Format training data and test input into LLM input tokens
-
-        Args:
-            datapoint (dict): contains training data, test input
-        
-        Returns:
-            prompt (dict): dictionary that contains input ids and additional informations
-        """
-
-        # 1) system prompt
-        token_ids = []
-        system_block = f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
-        token_ids += self.tokenizer.encode(system_block, add_special_tokens=False)
-
-        # 2) user prompt 1
-        user_block_1 = f"<|im_start|>user\n{user_message_template1.format(n=len(datapoint['train']), plural=('s' if len(datapoint['train'])!=1 else ''))}\n"
-        token_ids += self.tokenizer.encode(user_block_1, add_special_tokens=False)
-
-        # 3) examples
-        for i, ex in enumerate(datapoint['train'], start=1):
-            token_ids += self.tokenizer.encode(f"Example {i} Input:\n", add_special_tokens=False)
-            token_ids += self.format_grid(ex['input'])
-            token_ids += self.tokenizer.encode(f"Example {i} Output:\n", add_special_tokens=False)
-            token_ids += self.format_grid(ex['output'])
-
-        # 4) user prompt 2
-        user_block_2 = f"\n{user_message_template2}\n"
-        token_ids += self.tokenizer.encode(user_block_2, add_special_tokens=False)
-
-        # 5) test input
-        token_ids += self.tokenizer.encode("Test Input:\n", add_special_tokens=False)
-        token_ids += self.format_grid(datapoint['test'][0]['input'])
-
-        # 6) user prompt 3
-        user_block_3 = f"\n{user_message_template3}<|im_end|>\n"
-        token_ids += self.tokenizer.encode(user_block_3, add_special_tokens=False)
-
-        # 7) assistant response
-        token_ids += self.tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
-
-        # 8) 최종 프롬프트 생성
-        all_ids = token_ids
-        tokens = torch.tensor(all_ids, dtype=torch.long, device=self.device)
-
-        return {
-            "input_ids": tokens,
-            "input": datapoint['test'][0]['input'],
-            "train": datapoint['train']
-        }
-
-    # def grid_to_str(self, grid: List[List[int]]):
-    #     # 줄마다 012… 형식, 마지막 줄 포함 모든 줄 끝에 \n
-    #     return "".join(
-    #         f"{''.join(str(c) for c in row)}\n"
-    #         for row in grid
-    #     )
+    #     for row in grid:
+    #         for col in row:
+    #             ids.append(self.pixel_ids[col])
+    #         ids.append(self.sep)  # 한 행 끝마다 줄바꿈
+    #     return ids
 
     # def format_prompt(self, datapoint):
-    #     # Build example block
-    #     n = len(datapoint['train'])
-    #     plural = 's' if n != 1 else ''
-    #     examples_block = ''
+    #     """
+    #     Format training data and test input into LLM input tokens
+
+    #     Args:
+    #         datapoint (dict): contains training data, test input
+        
+    #     Returns:
+    #         prompt (dict): dictionary that contains input ids and additional informations
+    #     """
+
+    #     # 1) system prompt
+    #     token_ids = []
+    #     system_block = f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+    #     token_ids += self.tokenizer.encode(system_block, add_special_tokens=False)
+
+    #     # 2) user prompt 1
+    #     user_block_1 = f"<|im_start|>user\n{user_message_template1.format(n=len(datapoint['train']), plural=('s' if len(datapoint['train'])!=1 else ''))}\n"
+    #     token_ids += self.tokenizer.encode(user_block_1, add_special_tokens=False)
+
+    #     # 3) examples
     #     for i, ex in enumerate(datapoint['train'], start=1):
-    #         examples_block += f"Example {i} Input:\n"
-    #         examples_block += self.grid_to_str(ex['input'])
-    #         examples_block += f"Example {i} Output:\n"
-    #         examples_block += self.grid_to_str(ex['output'])
-    #     template1 = user_message_template1.format(n=n, plural=plural, examples=examples_block)
+    #         token_ids += self.tokenizer.encode(f"Example {i} Input:\n", add_special_tokens=False)
+    #         token_ids += self.format_grid(ex['input'])
+    #         token_ids += self.tokenizer.encode(f"Example {i} Output:\n", add_special_tokens=False)
+    #         token_ids += self.format_grid(ex['output'])
 
-    #     # Build test input block
-    #     test_input = f"Test Input:\n{self.grid_to_str(datapoint['test'][0]['input'])}"
-    #     template2 = user_message_template2.format(test_grid=test_input)
+    #     # 4) user prompt 2
+    #     user_block_2 = f"\n{user_message_template2}\n"
+    #     token_ids += self.tokenizer.encode(user_block_2, add_special_tokens=False)
 
-    #     # Assemble messages for chat template
-    #     messages = [
-    #         {"role": "system", "content": system_prompt},
-    #         {"role": "user",   "content": template1 + "\n" + template2 + "\n" + user_message_template3}
-    #     ]
+    #     # 5) test input
+    #     token_ids += self.tokenizer.encode("Test Input:\n", add_special_tokens=False)
+    #     token_ids += self.format_grid(datapoint['test'][0]['input'])
 
-    #     # 3) Apply chat template without tokenizing
-    #     text = self.tokenizer.apply_chat_template(
-    #         messages,
-    #         add_generation_prompt=True,
-    #         tokenize=False,
-    #         enable_thinking=False
-    #     )
+    #     # 6) user prompt 3
+    #     user_block_3 = f"\n{user_message_template3}<|im_end|>\n"
+    #     token_ids += self.tokenizer.encode(user_block_3, add_special_tokens=False)
 
-    #     # 4) Manually tokenize the resulting prompt text
-    #     inputs = self.tokenizer(text, return_tensors="pt")
-    #     # Extract the first sequence in the batch
-    #     input_ids = inputs["input_ids"][0]
+    #     # 7) assistant response
+    #     token_ids += self.tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
+
+    #     # 8) 최종 프롬프트 생성
+    #     all_ids = token_ids
+    #     tokens = torch.tensor(all_ids, dtype=torch.long, device=self.device)
 
     #     return {
-    #         'input_ids': input_ids,
-    #         'input': datapoint['test'][0]['input'],
-    #         'train': datapoint['train'],
+    #         "input_ids": tokens,
+    #         "input": datapoint['test'][0]['input'],
+    #         "train": datapoint['train']
     #     }
+
+    def grid_to_str(self, grid: List[List[int]]):
+        # 줄마다 012… 형식, 마지막 줄 포함 모든 줄 끝에 \n
+        return "".join(
+            f"{''.join(str(c) for c in row)}\n"
+            for row in grid
+        )
+
+    def format_prompt(self, datapoint):
+        # Build example block
+        n = len(datapoint['train'])
+        plural = 's' if n != 1 else ''
+        examples_block = ''
+        for i, ex in enumerate(datapoint['train'], start=1):
+            examples_block += f"Example {i} Input:\n"
+            examples_block += self.grid_to_str(ex['input'])
+            examples_block += f"Example {i} Output:\n"
+            examples_block += self.grid_to_str(ex['output'])
+        template1 = user_message_template1.format(n=n, plural=plural) + "\n" + examples_block
+
+        # Build test input block
+        test_input = f"Test Input:\n{self.grid_to_str(datapoint['test'][0]['input'])}"
+        template2 = user_message_template2 + "\n" + test_input
+
+        # Assemble messages for chat template
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": template1 + "\n" + template2 + "\n" + user_message_template3}
+        ]
+
+        # 3) Apply chat template without tokenizing
+        text = self.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False,
+            enable_thinking=False
+        )
+
+        # 4) Manually tokenize the resulting prompt text
+        inputs = self.tokenizer(text, return_tensors="pt")
+        # Extract the first sequence in the batch
+        input_ids = inputs["input_ids"][0]
+
+        return {
+            'input_ids': input_ids,
+            'input': datapoint['test'][0]['input'],
+            'train': datapoint['train'],
+        }
 
     def dynamic_collate(self, batch):
         """
@@ -360,8 +360,8 @@ class ARCSolver:
         peft_config = LoraConfig(
             task_type="CAUSAL_LM",
             inference_mode=False,
-            r=8,                     # LoRA rank - determines the size of the update matrices
-            lora_alpha=16,           # LoRA scaling factor - controls the magnitude of updates
+            r=32,                     # LoRA rank - determines the size of the update matrices
+            lora_alpha=64,           # LoRA scaling factor - controls the magnitude of updates
             lora_dropout=0.1,        # Dropout probability for LoRA layers
             target_modules=["q_proj","k_proj","v_proj","o_proj"], # Apply LoRA to attention modules only
         )
@@ -539,8 +539,8 @@ class ARCSolver:
                     # Set model back to training mode after validation
                     self.model.train()
 
-                # Save checkpoint every 10000 steps
-                if global_step % 10000 == 0:
+                # Save checkpoint every 5000 steps
+                if global_step % 5000 == 0:
                     self.save_model(os.path.join(save_dir, f"checkpoint-{global_step}"), optimizer, scheduler, epoch, global_step, best_val_accuracy, best_val_loss)
 
                 # 배치 단위 메모리 정리

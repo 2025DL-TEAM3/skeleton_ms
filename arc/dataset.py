@@ -143,7 +143,8 @@ class ARCDataset(Dataset):
             inp_ids = torch.tensor(prompt['input_ids'], dtype=torch.long)
 
         # target_ids tensor (answer)
-        tgt_tokens = self.solver.format_grid(test_ex["output"])
+        # tgt_tokens = self.solver.format_grid(test_ex["output"])
+        tgt_tokens = self.tokenizer.encode(self.solver.grid_to_str(test_ex["output"]))
         if tgt_tokens[-1] != self.tokenizer.eos_token_id: # <|im_end|>
             tgt_tokens.append(self.tokenizer.eos_token_id)
         tgt_ids = torch.tensor(tgt_tokens, dtype=torch.long)
