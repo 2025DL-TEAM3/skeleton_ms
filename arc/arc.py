@@ -200,7 +200,7 @@ class ARCSolver:
             examples_block += self.grid_to_str(ex['input'])
             examples_block += f"Example {i} Output:\n"
             examples_block += self.grid_to_str(ex['output'])
-        template1 = user_message_template1.format(n=n, plural=plural) + "\n" + examples_block
+        template1 = user_message_template1.format(n=n, plural=plural) + "\n" + examples_block + "\n" + "Observe how each input becomes its output."
 
         # Build test input block
         test_input = f"Test Input:\n{self.grid_to_str(datapoint['test'][0]['input'])}"
