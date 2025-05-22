@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
+from collections import Counter
 
 class ARCSolver:
     """
@@ -360,8 +361,8 @@ class ARCSolver:
         peft_config = LoraConfig(
             task_type="CAUSAL_LM",
             inference_mode=False,
-            r=32,                     # LoRA rank - determines the size of the update matrices
-            lora_alpha=64,           # LoRA scaling factor - controls the magnitude of updates
+            r=16,                     # LoRA rank - determines the size of the update matrices
+            lora_alpha=32,           # LoRA scaling factor - controls the magnitude of updates
             lora_dropout=0.1,        # Dropout probability for LoRA layers
             target_modules=["q_proj","k_proj","v_proj","o_proj"], # Apply LoRA to attention modules only
         )
@@ -497,7 +498,7 @@ class ARCSolver:
                 # Validation check - 첫 번째 에폭에서는 검증 건너뛰기
                 if val_loader is not None and global_step % val_steps == 0 and epoch >= 0:
                     val_loss, val_accuracy = self.validate(val_loader)
-                    torch.cuda.empty_cache() # 메모리 정리
+                    # torch.cuda.empty_cache() # 메모리 정리
                     log_message(f"[Validation] global_step {global_step} loss {val_loss:.4f} accuracy {val_accuracy:.4f}")
                     
                     # 메트릭 로깅
@@ -550,7 +551,7 @@ class ARCSolver:
             log_message(f"Epoch {epoch+1} avg loss {avg_epoch_loss:.4f}")
 
             # 에폭 완료 후 캐시 정리
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             
             # 에폭 완료 후 메트릭 로깅 - train loss만 기록
             with open(metrics_log_file, 'a', encoding='utf-8') as f:
@@ -724,78 +725,227 @@ class ARCSolver:
         with open(os.path.join(path, "model_config.json"), 'w') as f:
             json.dump(info, f, indent=2)
 
-    def predict(self, examples, questions_input):
-        """
-        A single example of test data is given.
-        You should predict 2D grid (List[List[int]] or np.ndarray)
+    # def predict(self, examples, questions_input):
+    #     """
+    #     A single example of test data is given.
+    #     You should predict 2D grid (List[List[int]] or np.ndarray)
 
-        Args:
-            examples (List[dict]): List of training examples,
-                each list element is a dictionary that contains "input" and "output"
-                for example,
-                [
-                    {
-                        "input": [[1,2],[3,4]],
-                        "output": [[4,5],[6,7]],
-                    },
-                    {
-                        "input": [[0,1],[2,3]],
-                        "output": [[3,4],[5,6]],
-                    }
-                ]
-            questions_input (List[List[int]]): A 2d grid,
-                which is a input for a given question
-        Returns:
-            output (List[List[int]]): A 2d grid,
-                which is the output of given input question.
-        """
-        # 프롬프트 데이터 구성
-        datapoint = {"train": examples, "test": [{"input": questions_input}]}
+    #     Args:
+    #         examples (List[dict]): List of training examples,
+    #             each list element is a dictionary that contains "input" and "output"
+    #             for example,
+    #             [
+    #                 {
+    #                     "input": [[1,2],[3,4]],
+    #                     "output": [[4,5],[6,7]],
+    #                 },
+    #                 {
+    #                     "input": [[0,1],[2,3]],
+    #                     "output": [[3,4],[5,6]],
+    #                 }
+    #             ]
+    #         questions_input (List[List[int]]): A 2d grid,
+    #             which is a input for a given question
+    #     Returns:
+    #         output (List[List[int]]): A 2d grid,
+    #             which is the output of given input question.
+    #     """
+    #     # 프롬프트 데이터 구성
+    #     datapoint = {"train": examples, "test": [{"input": questions_input}]}
 
-        # 프롬프트 생성 및 토큰화
-        prompt = self.format_prompt(datapoint)
-        ids = prompt['input_ids'].unsqueeze(0).to(self.device) # (1, seq_len)
-        attn_mask = ids.ne(self.tokenizer.pad_token_id).long()
+    #     # 프롬프트 생성 및 토큰화
+    #     prompt = self.format_prompt(datapoint)
+    #     ids = prompt['input_ids'].unsqueeze(0).to(self.device) # (1, seq_len)
+    #     attn_mask = ids.ne(self.tokenizer.pad_token_id).long()
 
-        # 생성 설정 - 실제 예측에서는 샘플링 사용
-        config = GenerationConfig(
-            do_sample=True, 
-            temperature=0.7, 
-            top_p=0.8,
-            top_k=20,
-            bos_token_id=151643,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
-            max_new_tokens=150
-        )
+    #     # 생성 설정 - 실제 예측에서는 샘플링 사용
+    #     config = GenerationConfig(
+    #         do_sample=True, 
+    #         temperature=0.7, 
+    #         top_p=0.8,
+    #         top_k=20,
+    #         bos_token_id=151643,
+    #         eos_token_id=self.tokenizer.eos_token_id,
+    #         pad_token_id=self.tokenizer.pad_token_id,
+    #         max_new_tokens=150
+    #     )
 
-        # 모델로부터 출력 생성
-        with torch.no_grad():
-            out = self.model.generate(input_ids=ids, attention_mask=attn_mask, generation_config=config).squeeze().cpu()
-        N_prompt = ids.size(1)
+    #     # 모델로부터 출력 생성
+    #     with torch.no_grad():
+    #         out = self.model.generate(input_ids=ids, attention_mask=attn_mask, generation_config=config).squeeze().cpu()
+    #     N_prompt = ids.size(1)
 
-        # 프롬프트 이후의 토큰만 추출
-        output = out[N_prompt:].tolist()
-        train_input = np.array(prompt['train'][0]['input'])
-        train_output = np.array(prompt['train'][0]['output'])
-        test_input = np.array(prompt['input'])
+    #     # 프롬프트 이후의 토큰만 추출
+    #     output = out[N_prompt:].tolist()
+    #     train_input = np.array(prompt['train'][0]['input'])
+    #     train_output = np.array(prompt['train'][0]['output'])
+    #     test_input = np.array(prompt['input'])
 
-        # LLM-generated grid may have wrong shape
-        # So adjust shape by input-output pairs
-        if train_input.shape == train_output.shape:
-            x, y = test_input.shape
+    #     # LLM-generated grid may have wrong shape
+    #     # So adjust shape by input-output pairs
+    #     if train_input.shape == train_output.shape:
+    #         x, y = test_input.shape
+    #     else:
+    #         x = (train_output.shape[0] * test_input.shape[0]) // train_input.shape[0]
+    #         y = (train_output.shape[1] * test_input.shape[1]) // train_input.shape[1]
+
+    #     try:
+    #         grid = np.array(self.parse_grid(output))
+    #     except Exception as e:
+    #         # 파싱 실패 시 랜덤 그리드 반환
+    #         grid = np.random.randint(0, 10, (x, y))
+
+    #     return grid
+
+    def apply_augmentation(self, examples, questions_input, i):
+        if i < 4:
+            augmented_examples = []
+            for example in examples:
+                augmented_examples.append({
+                    "input": np.rot90(example["input"], k=i).tolist(),
+                    "output": np.rot90(example["output"], k=i).tolist()
+                })
+            augmented_questions_input = np.rot90(questions_input, k=i).tolist()
+        elif i < 6:
+            augmented_examples = []
+            for example in examples:
+                augmented_examples.append({
+                    "input": np.flip(example["input"], axis=(i - 4) % 2).tolist(),
+                    "output": np.flip(example["output"], axis=(i - 4) % 2).tolist()
+                })
+            augmented_questions_input = np.flip(questions_input, axis=(i - 4) % 2).tolist()
+        elif i == 6:
+            augmented_examples = []
+            for example in examples:
+                augmented_examples.append({
+                    "input": (9 - np.array(example["input"])).tolist(),
+                    "output": (9 - np.array(example["output"])).tolist()
+                })
+            augmented_questions_input = (9 - np.array(questions_input)).tolist()
+        elif i == 7:
+            augmented_examples = []
+            for example in examples:
+                augmented_examples.append({
+                    "input": np.transpose(np.array(example["input"])).tolist(),
+                    "output": np.transpose(np.array(example["output"])).tolist()
+                })
+            augmented_questions_input = np.transpose(np.array(questions_input)).tolist()
         else:
-            x = (train_output.shape[0] * test_input.shape[0]) // train_input.shape[0]
-            y = (train_output.shape[1] * test_input.shape[1]) // train_input.shape[1]
+            raise ValueError(f"Invalid augmentation index: {i}")
+        return augmented_examples, augmented_questions_input
 
-        try:
-            grid = np.array(self.parse_grid(output))
-        except Exception as e:
-            # 파싱 실패 시 랜덤 그리드 반환
-            grid = np.random.randint(0, 10, (x, y))
+    def unapply_augmentation(self, logits_grid: torch.Tensor, i):
+        if i < 4:
+            k = (4 - i) % 4
+            geom_restored = torch.rot90(logits_grid, k=k, dims=(0, 1))
+        elif i < 6:
+            geom_restored = torch.flip(logits_grid, dims=((i - 4) % 2,))
+        elif i == 6:
+            V = logits_grid.size(-1)
+            perm = torch.arange(V, device=logits_grid.device)
+            for c in range(10):
+                orig_id = self.pixel_ids[c]
+                aug_id = self.pixel_ids[9 - c]
+                perm[orig_id] = aug_id
+            geom_restored = logits_grid.index_select(-1, perm)
+        elif i == 7:
+            geom_restored = logits_grid.transpose(0, 1)
+        else:
+            raise ValueError(f"Invalid augmentation index: {i}")
+        return geom_restored
 
-        return grid
+    def build_augmented_prompts(self, examples, questions_input):
+        prompts_ids = []
 
+        for i in range(8):
+            augmented_examples, augmented_questions_input = self.apply_augmentation(examples, questions_input, i)
+            prompt = self.format_prompt({"train": augmented_examples, "test": [{"input": augmented_questions_input}]})
+            prompts_ids.append(prompt['input_ids'])
+        
+        tensors = [ids.detach().clone() for ids in prompts_ids]
+        padded = pad_sequence(tensors, batch_first=True, padding_value=self.tokenizer.pad_token_id, padding_side="left")
+        attn_mask = padded.ne(self.tokenizer.pad_token_id).long()
+
+        return padded.to(self.device), attn_mask.to(self.device)
+
+    def predict(self, examples, questions_input):
+        # 프롬프트 데이터 구성
+        padded_ids, attn_mask = self.build_augmented_prompts(examples, questions_input) # (B, seq_len)
+        batch_size = padded_ids.size(0) # B
+        N_prompt = padded_ids.size(1) # seq_len
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=padded_ids,
+                attention_mask=attn_mask,
+                return_dict_in_generate=True,
+                output_scores=True,
+                max_new_tokens=150,
+                do_sample=True, 
+                temperature=0.7, 
+                top_p=0.8,
+                top_k=20,
+                eos_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+
+        # (B, gen_len, vocab_size)
+        scores = torch.stack(outputs.scores, dim=1)
+
+        batch_logits_grids = []
+        for i in range(batch_size):
+            seq = outputs.sequences[i] # (seq_len + gen_len)
+            gen_ids = seq[N_prompt:].tolist()
+
+            grid_rows = []
+            row_logits = []
+            for step_idx, tok in enumerate(gen_ids):
+                if tok == self.sep:
+                    if row_logits:
+                        grid_rows.append(torch.stack(row_logits, dim=0))
+                        row_logits = []
+                elif tok == self.tokenizer.eos_token_id or tok == self.tokenizer.pad_token_id:
+                    break
+                else:
+                    # get logits and apply softmax
+                    prob = torch.softmax(scores[i, step_idx, :], dim=-1)
+                    row_logits.append(prob)
+            if row_logits:
+                grid_rows.append(torch.stack(row_logits, dim=0))
+
+            grid_tensor = torch.stack(grid_rows, dim=0) # (H, W, V)
+            unapplied_grid_tensor = self.unapply_augmentation(grid_tensor, i) # (H', W', V)
+            batch_logits_grids.append(unapplied_grid_tensor)
+        
+        shape_3d = [g for g in batch_logits_grids if g.dim() == 3]
+        shape_counts = Counter(tuple(g.shape) for g in shape_3d)
+        most_frequent_shape = torch.Size(max(shape_counts, key=shape_counts.get))
+        valid_shape_3d = [g for g in shape_3d if tuple(g.shape) == tuple(most_frequent_shape)]
+
+        # (N, H, W, V)
+        stacked = torch.stack(valid_shape_3d, dim=0)
+
+        # (H, W, V)
+        sum_logits = torch.sum(stacked, dim=0)
+        # weights = stacked.max(dim=-1).values
+        # sum_logits = torch.sum(stacked * weights.unsqueeze(-1), dim=0)
+
+        # (H, W)
+        mask = torch.full_like(sum_logits, -1e9) # filter out other than 0-9
+        mask[:, :, self.pixel_ids] = 0
+        sum_logits = sum_logits + mask
+        top_token_ids = torch.argmax(sum_logits, dim=-1)
+
+        # (H, W)
+        inv_map = {k: i for i, k in enumerate(self.pixel_ids)}
+        values = [
+            [inv_map[tok] for tok in row]
+            for row in top_token_ids.tolist()
+        ]
+        most_likely_values = torch.tensor(values, dtype=torch.int64)
+
+        return most_likely_values.cpu().numpy()
+                
     def prepare_evaluation(self, path="artifacts/qwen3-4b-lora/checkpoint-final"):
         """
         Load pretrained weight, make model eval mode, etc.
