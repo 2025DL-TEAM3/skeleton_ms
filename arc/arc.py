@@ -31,14 +31,15 @@ class ARCSolver:
     You should implement a `Solver` class for the project.
     """
 
-    def __init__(self, token=None):
+    def __init__(self, stage1_path=None, token=None):
         """
         Args:
+            stage1_path (str): path to the stage1 model, stage1 = attention head optimization / stage2 = lm_head optimization
             token (str): a huggingface token for restricted models such as llama3
         """
         config_path = "artifacts/config/config.yml"
         model_id = "Qwen/Qwen3-4B"
-        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         
         # 허깅페이스 캐시 디렉토리 설정
         cache_dir = "/2025pdp/.cache"
@@ -52,7 +53,7 @@ class ARCSolver:
             bnb_4bit_compute_dtype=torch.float16,  # Set the computation data type
         )
 
-        # Load tokenizer first
+        # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id, 
             token=token,
@@ -71,7 +72,6 @@ class ARCSolver:
             device_map=self.device, # Automatically map the model to available devices (e.g., GPUs)
             token=token,
             cache_dir=cache_dir,  # 캐시 디렉토리 지정
-            # tie_word_embeddings=False,  # 커스텀 헤드를 위해 word embeddings를 분리
         ).to(self.device)  # Move model to device
 
         ###### add this if you get OOM error
@@ -81,13 +81,26 @@ class ARCSolver:
         #     self.model.enable_input_require_grads()
         ######
 
-        # Apply custom head optimization
-        # in_emb: [V, hidden_dim] -> [K, hidden_dim] , out_emb: [V, hidden_dim] -> [K, hidden_dim]
-        # self.model, self.tokenizer, self.token_mapping = apply_custom_head(self.model, self.tokenizer)
-        # self.model.config.pad_token_id = self.tokenizer.pad_token_id
-        # self.model.config.eos_token_id = self.tokenizer.eos_token_id
-        # print(f"✓ Model vocabulary optimized for ARC: {len(self.token_mapping)} tokens kept")
+        if stage1_path is not None:
+            self.model = PeftModel.from_pretrained(
+                self.model,
+                stage1_path,
+                is_trainable=False, # stage1 LoRA is not trainable, freeze all parameters
+            ).to(self.device)
+            print(f"✓ Stage1 model loaded from {stage1_path}")
+            
+            # now untie the embed_tok and lm_head
+            self.model.tie_word_embeddings = False
 
+            # clone embedding to lm_head, shrink model embeddings
+            # in_emb: [V, hidden_dim] -> [K, hidden_dim] , out_emb: [V, hidden_dim] -> [K, hidden_dim]
+            self.model, self.tokenizer, self.token_mapping = apply_custom_head(self.model, self.tokenizer)
+            self.model.config.pad_token_id = self.tokenizer.pad_token_id
+            self.model.config.eos_token_id = self.tokenizer.eos_token_id
+
+            print(f"✓ Model vocabulary optimized for ARC: {len(self.token_mapping)} tokens kept")
+
+        self.stage2 = stage1_path is not None
         self.pixel_ids = [
             self.tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)
         ]
@@ -285,7 +298,7 @@ class ARCSolver:
         outputs = self.model(input_ids=inp, attention_mask=attn_mask, labels=labels)
         return outputs.loss
 
-    def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, 
+    def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate,
                save_dir: str = 'artifacts/qwen3-4b-lora', resume_from: str = None, validation_dataset=None, 
                patience=10, val_steps=1000, fixed_seed=42, max_val_files=50, val_steps_per_file=2, val_batch_size=4):
         """
@@ -328,24 +341,40 @@ class ARCSolver:
         log_message(f"Steps per file: {steps_per_file}, Grad. accum: {steps_accum}, Warmup rate: {warmup_rate}")
         
         # Configure LoRA parameters for efficient fine-tuning
-        peft_config = LoraConfig(
-            task_type="CAUSAL_LM",
-            inference_mode=False,
-            r=16,                     # LoRA rank - determines the size of the update matrices
-            lora_alpha=32,           # LoRA scaling factor - controls the magnitude of updates
-            lora_dropout=0.1,        # Dropout probability for LoRA layers
-            target_modules=["q_proj","k_proj","v_proj","o_proj"],#, "lm_head", "embed_tokens"],
-        )
-        
-        # Apply LoRA to the model
+        if self.stage2:
+            peft_config = LoraConfig(
+                task_type="CAUSAL_LM",
+                inference_mode=False,
+                r=4,                     # LoRA rank - determines the size of the update matrices
+                lora_alpha=8,           # LoRA scaling factor - controls the magnitude of updates
+                lora_dropout=0.1,        # Dropout probability for LoRA layers
+                target_modules=["lm_head"],
+            )
+        else:
+            peft_config = LoraConfig(
+                task_type="CAUSAL_LM",
+                inference_mode=False,
+                r=16,                     # LoRA rank - determines the size of the update matrices
+                lora_alpha=32,           # LoRA scaling factor - controls the magnitude of updates
+                lora_dropout=0.1,        # Dropout probability for LoRA layers
+                target_modules=["q_proj","k_proj","v_proj","o_proj"],
+            )
+
+        # attach new lora_A / lora_B to the model
         self.model = get_peft_model(self.model, peft_config)
         self.model.print_trainable_parameters() # Display the number of trainable parameters
+
+        if self.stage2:
+            # get_peft_model re-activate (set requires_grad to True) for all LoRA weights
+            for n, p in self.model.named_parameters():
+                p.requires_grad = "lm_head" in n and "lora_" in n # only lm_head is trainable
+            self.model.print_trainable_parameters()
         
         # Initialize dataset and data loader
         dataset = ARCDataset(train_dataset, self.tokenizer, self, steps_per_file=steps_per_file, is_validation=False)
         
         # Initialize optimizer with specified learning rate
-        optimizer = AdamW(self.model.parameters(), lr=lr)
+        optimizer = AdamW(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr)
 
         # 1) 한 에폭당 optimizer step 수
         steps_per_epoch = (len(dataset) // batch_size) // steps_accum
@@ -875,9 +904,12 @@ class ARCSolver:
             if row_logits:
                 grid_rows.append(torch.stack(row_logits, dim=0))
 
-            grid_tensor = torch.stack(grid_rows, dim=0) # (H, W, V)
-            unapplied_grid_tensor = self.unapply_augmentation(grid_tensor, i) # (H', W', V)
-            batch_logits_grids.append(unapplied_grid_tensor)
+            try:
+                grid_tensor = torch.stack(grid_rows, dim=0) # (H, W, V)
+                unapplied_grid_tensor = self.unapply_augmentation(grid_tensor, i) # (H', W', V)
+                batch_logits_grids.append(unapplied_grid_tensor)
+            except Exception as e:
+                continue
         
         shape_3d = [g for g in batch_logits_grids if g.dim() == 3]
         shape_counts = Counter(tuple(g.shape) for g in shape_3d)
