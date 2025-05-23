@@ -24,6 +24,7 @@ from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 from collections import Counter
+from .custom_head import apply_custom_head
 
 class ARCSolver:
     """
@@ -37,7 +38,7 @@ class ARCSolver:
         """
         config_path = "artifacts/config/config.yml"
         model_id = "Qwen/Qwen3-4B"
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         
         # 허깅페이스 캐시 디렉토리 설정
         cache_dir = "/2025pdp/.cache"
@@ -50,6 +51,16 @@ class ARCSolver:
             bnb_4bit_quant_type="nf4",  # Specify the quantization type
             bnb_4bit_compute_dtype=torch.float16,  # Set the computation data type
         )
+
+        # Load tokenizer first
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_id, 
+            token=token,
+            cache_dir=cache_dir,
+        )
+        self.tokenizer.bos_token_id = 151643 # Default for Qwen3
+
+        # Load base model
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
             trust_remote_code=True, # Allow the model to use custom code from the repository
@@ -59,7 +70,8 @@ class ARCSolver:
             use_cache=False, # Disable caching to save memory
             device_map=self.device, # Automatically map the model to available devices (e.g., GPUs)
             token=token,
-            cache_dir=cache_dir  # 캐시 디렉토리 지정
+            cache_dir=cache_dir,  # 캐시 디렉토리 지정
+            # tie_word_embeddings=False,  # 커스텀 헤드를 위해 word embeddings를 분리
         ).to(self.device)  # Move model to device
 
         ###### add this if you get OOM error
@@ -69,21 +81,17 @@ class ARCSolver:
         #     self.model.enable_input_require_grads()
         ######
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_id, 
-            token=token,
-            cache_dir=cache_dir,  # 토크나이저도 동일한 캐시 디렉토리 사용
-        )
+        # Apply custom head optimization
+        # in_emb: [V, hidden_dim] -> [K, hidden_dim] , out_emb: [V, hidden_dim] -> [K, hidden_dim]
+        # self.model, self.tokenizer, self.token_mapping = apply_custom_head(self.model, self.tokenizer)
+        # self.model.config.pad_token_id = self.tokenizer.pad_token_id
+        # self.model.config.eos_token_id = self.tokenizer.eos_token_id
+        # print(f"✓ Model vocabulary optimized for ARC: {len(self.token_mapping)} tokens kept")
 
         self.pixel_ids = [
             self.tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)
         ]
         self.sep = self.tokenizer.encode("\n", add_special_tokens=False)[0]
-        self.allowed_tokens = set(
-            self.pixel_ids + [self.sep, self.tokenizer.eos_token_id]
-        )
-        V = self.model.config.vocab_size
-        self.disallowed_tokens = [i for i in range(V) if i not in self.allowed_tokens]
 
     def parse_grid(self, ids: List[int]):
         """
@@ -200,7 +208,7 @@ class ARCSolver:
             examples_block += self.grid_to_str(ex['input'])
             examples_block += f"Example {i} Output:\n"
             examples_block += self.grid_to_str(ex['output'])
-        template1 = user_message_template1.format(n=n, plural=plural) + "\n" + examples_block + "\n" + "Observe how each input becomes its output."
+        template1 = user_message_template1.format(n=n, plural=plural) + "\n" + examples_block + "Observe how each input becomes its output."
 
         # Build test input block
         test_input = f"Test Input:\n{self.grid_to_str(datapoint['test'][0]['input'])}"
@@ -277,44 +285,6 @@ class ARCSolver:
         outputs = self.model(input_ids=inp, attention_mask=attn_mask, labels=labels)
         return outputs.loss
 
-    def seq2seq_loss_with_regularization(self, prompt_ids, target_ids, epoch=0, lambda_base=0.01, tau=0.05):
-        """
-        Teacher-forcing seq2seq loss + margin-based disallowed-token regularization.
-        lambda_base: disallowed 확률 페널티 강도 (0.01 ~ 0.2 권장)
-        tau: margin threshold - 이 값보다 높은 확률만 페널티 적용
-        epoch: 현재 에폭 - 첫 에폭에서는 정규화 적용하지 않음
-        """
-        # 1) concat input + target
-        inp = torch.cat([prompt_ids, target_ids], dim=1)
-        attn_mask = inp.ne(self.tokenizer.pad_token_id).long()
-
-        # 2) prepare labels (-100 for prompt and pad)
-        labels = inp.clone()
-        labels[:, :prompt_ids.size(1)] = -100
-        labels[labels == self.tokenizer.pad_token_id] = -100
-
-        # 3) forward pass - teacher forcing with model's built-in loss
-        outputs = self.model(input_ids=inp, attention_mask=attn_mask, labels=labels)
-        ce_loss = outputs.loss
-        logits = outputs.logits  # (B, L_total, V)
-
-        # 4) margin-based regularization term
-        log_probs = F.log_softmax(logits, dim=-1)  # 로그 확률 계산 (B, L, V)
-        
-        # disallowed 토큰에 대한 로그 확률을 모두 더한 후 지수화
-        dis_idx = torch.tensor(self.disallowed_tokens, device=logits.device)
-        log_p_dis = torch.logsumexp(log_probs.index_select(-1, dis_idx), dim=-1)  # (B, L)
-        p_dis = torch.exp(log_p_dis)  # 로그 확률을 다시 확률로 변환
-        
-        # target 부분에 대해서만 계산
-        tgt_dis = p_dis[:, prompt_ids.size(1):]  # target part only (B, L_tgt)
-        over = torch.relu(tgt_dis - tau)  # margin (B, L_tgt)
-        reg_term = over.mean()  # average
-        
-        # λ ramp‑up after 1 epoch
-        lam = 0.0 if epoch < 1 else lambda_base
-        return ce_loss + lam * reg_term
-
     def train(self, train_dataset, batch_size, lr, num_epochs, steps_per_file, steps_accum, warmup_rate, 
                save_dir: str = 'artifacts/qwen3-4b-lora', resume_from: str = None, validation_dataset=None, 
                patience=10, val_steps=1000, fixed_seed=42, max_val_files=50, val_steps_per_file=2, val_batch_size=4):
@@ -364,7 +334,7 @@ class ARCSolver:
             r=16,                     # LoRA rank - determines the size of the update matrices
             lora_alpha=32,           # LoRA scaling factor - controls the magnitude of updates
             lora_dropout=0.1,        # Dropout probability for LoRA layers
-            target_modules=["q_proj","k_proj","v_proj","o_proj"], # Apply LoRA to attention modules only
+            target_modules=["q_proj","k_proj","v_proj","o_proj"],#, "lm_head", "embed_tokens"],
         )
         
         # Apply LoRA to the model
@@ -584,7 +554,6 @@ class ARCSolver:
         val_config = GenerationConfig(
             do_sample=False,  # 샘플링 없이 확정적 생성
             use_cache=False,  # 캐시 사용 비활성화
-            bos_token_id=151643,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
             max_new_tokens=150
@@ -738,12 +707,6 @@ class ARCSolver:
     #                 {
     #                     "input": [[1,2],[3,4]],
     #                     "output": [[4,5],[6,7]],
-    #                 },
-    #                 {
-    #                     "input": [[0,1],[2,3]],
-    #                     "output": [[3,4],[5,6]],
-    #                 }
-    #             ]
     #         questions_input (List[List[int]]): A 2d grid,
     #             which is a input for a given question
     #     Returns:
@@ -764,7 +727,6 @@ class ARCSolver:
     #         temperature=0.7, 
     #         top_p=0.8,
     #         top_k=20,
-    #         bos_token_id=151643,
     #         eos_token_id=self.tokenizer.eos_token_id,
     #         pad_token_id=self.tokenizer.pad_token_id,
     #         max_new_tokens=150
