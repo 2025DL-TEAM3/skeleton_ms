@@ -980,11 +980,12 @@ class ARCSolver:
                 output_scores=True,
                 max_new_tokens=150,
                 do_sample=True, 
-                temperature=0.7, 
+                temperature=0.5, 
                 top_p=0.8,
-                top_k=20,
+                top_k=30,
                 eos_token_id=self.tokenizer.eos_token_id,
                 pad_token_id=self.tokenizer.pad_token_id,
+                use_cache=True,
             )
 
         # (B, gen_len, vocab_size)
