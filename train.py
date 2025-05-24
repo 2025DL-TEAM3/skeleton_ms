@@ -10,7 +10,6 @@ def main():
     parser = argparse.ArgumentParser(description='Train ARCSolver with ARC dataset')
     parser.add_argument('--token', type=str, default=None, help='HuggingFace token')
     parser.add_argument('--dataset', type=str, default='/home/student/workspace/dataset', help='Dataset name or path')
-    parser.add_argument('--stage1', type=str, default=None, help='Stage1 model path')
     parser.add_argument('--save_dir', type=str, default='artifacts/qwen3-4b-lora', help='Save directory')
     parser.add_argument('--resume_from', type=str, default=None, help='Resume training from checkpoint')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
@@ -44,7 +43,7 @@ def main():
     
     # ARCSolver 인스턴스 생성
     print("Initializing model...")
-    solver = ARCSolver(token=args.token, stage1_path=args.stage1)
+    solver = ARCSolver(token=args.token)
 
     # configuration
     batch_size = 1

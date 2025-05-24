@@ -340,7 +340,7 @@ class ARCSolver:
         log_message(f"Steps per file: {steps_per_file}, Grad. accum: {steps_accum}, Warmup rate: {warmup_rate}")
         
         # Configure LoRA parameters for efficient fine-tuning
-        peft_attn = LoraConfig(
+        peft_config = LoraConfig(
             task_type="CAUSAL_LM",
             inference_mode=False,
             r=16,                     # LoRA rank - determines the size of the update matrices
@@ -349,8 +349,11 @@ class ARCSolver:
             target_modules=["q_proj","k_proj","v_proj","o_proj", "lm_head"],
         )
         # wrap the base model as a Peft model
-        self.model = get_peft_model(self.model, peft_attn, adapter_name="attn")
+        self.model = get_peft_model(self.model, peft_config)
         self.model.print_trainable_parameters() # Display the number of trainable parameters
+        # for name, param in self.model.named_parameters():
+        #     if param.requires_grad:
+        #         print(f"{name}")
         
         # Initialize dataset and data loader
         dataset = ARCDataset(train_dataset, self.tokenizer, self, steps_per_file=steps_per_file, is_validation=False)
@@ -946,37 +949,19 @@ class ARCSolver:
 
         return most_likely_values.cpu().numpy()
                 
-    def prepare_evaluation(self, path="artifacts/qwen3-4b-lora/checkpoint-final", use_custom_head=True):
+    def prepare_evaluation(self, path="artifacts/qwen3-4b-lora/checkpoint-final"):
         """
         Load pretrained weight, make model eval mode, etc.
         """
         try:
             # 캐시 디렉토리 설정
             cache_dir = "/2025pdp/.cache"
-
-            # custom head 사용 시 tokenizer 설정
-            if use_custom_head:
-                # now untie the embed_tok and lm_head
-                self.model.tie_word_embeddings = False
-
-                # clone embedding to lm_head, shrink model embeddings
-                # in_emb: [V, hidden_dim] -> [K, hidden_dim] , out_emb: [V, hidden_dim] -> [K, hidden_dim]
-                self.model, self.tokenizer, self.token_mapping = apply_custom_head(self.model, self.tokenizer)
-                self.model.config.pad_token_id = self.tokenizer.pad_token_id
-                self.model.config.eos_token_id = self.tokenizer.eos_token_id
-                print(f"✓ Model vocabulary optimized for ARC: {len(self.token_mapping)} tokens kept")
-
-                self.pixel_ids = [
-                    self.tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)
-                ]
-                self.sep = self.tokenizer.encode("\n", add_special_tokens=False)[0]
-            
             peft_conf = PeftConfig.from_pretrained(path, cache_dir=cache_dir)
             self.model = PeftModel.from_pretrained(
-                self.model, 
+                self.model,
                 path, 
                 is_trainable=False,
-                cache_dir=cache_dir
+                cache_dir=cache_dir,
             )
             print(f"Loaded LoRA adapter: {path}")
         except Exception as e:
