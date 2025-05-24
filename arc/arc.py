@@ -823,32 +823,50 @@ class ARCSolver:
 
         return augmented_examples, augmented_questions_input
 
-    def unapply_augmentation(self, logits_grid: torch.Tensor, i):
+    # def unapply_augmentation(self, logits_grid: torch.Tensor, i): # (H, W, V)
+    #     if i == 0: # original
+    #         geom_restored = logits_grid
+    #     elif i == 1: # invert colors
+    #         V = logits_grid.size(-1)
+    #         perm = torch.arange(V, device=logits_grid.device)
+    #         for c in range(10):
+    #             orig_id = self.pixel_ids[c]
+    #             aug_id = self.pixel_ids[9 - c]
+    #             perm[orig_id] = aug_id
+    #         geom_restored = logits_grid.index_select(-1, perm)
+    #     elif 2 <= i <= 5: # color permutation
+    #         inv = self.color_perms_inv[i-2]             # numpy array len-10
+    #         V   = logits_grid.size(-1)
+    #         perm = torch.arange(V, device=logits_grid.device)
+    #         for c in range(10):
+    #             orig = self.pixel_ids[c]
+    #             invc = self.pixel_ids[inv[c]]
+    #             perm[orig] = invc
+    #         geom_restored = logits_grid.index_select(-1, perm)
+    #     elif i == 6: # flip horizontally
+    #         geom_restored = torch.flip(logits_grid, dims=(1,))
+    #     elif i == 7: # 90 degree rotated -> 270 degree rotation to restore
+    #         geom_restored = torch.rot90(logits_grid, k=3, dims=(0, 1))
+    #     elif i == 8: # transpose
+    #         geom_restored = logits_grid.transpose(0, 1)
+    #     else:
+    #         raise ValueError(f"Invalid augmentation index: {i}")
+    #     return geom_restored
+
+    def unapply_augmentation(self, token_ids_grid: torch.Tensor, i): # (H, W)
         if i == 0: # original
-            geom_restored = logits_grid
+            geom_restored = token_ids_grid
         elif i == 1: # invert colors
-            V = logits_grid.size(-1)
-            perm = torch.arange(V, device=logits_grid.device)
-            for c in range(10):
-                orig_id = self.pixel_ids[c]
-                aug_id = self.pixel_ids[9 - c]
-                perm[orig_id] = aug_id
-            geom_restored = logits_grid.index_select(-1, perm)
+            geom_restored = (9 - token_ids_grid).to(self.device)
         elif 2 <= i <= 5: # color permutation
-            inv = self.color_perms_inv[i-2]             # numpy array len-10
-            V   = logits_grid.size(-1)
-            perm = torch.arange(V, device=logits_grid.device)
-            for c in range(10):
-                orig = self.pixel_ids[c]
-                invc = self.pixel_ids[inv[c]]
-                perm[orig] = invc
-            geom_restored = logits_grid.index_select(-1, perm)
+            inv = torch.tensor(self.color_perms_inv[i-2], device=token_ids_grid.device)  # shape (10,)
+            geom_restored = inv[token_ids_grid]  # Advanced indexing으로 매핑
         elif i == 6: # flip horizontally
-            geom_restored = torch.flip(logits_grid, dims=(1,))
+            geom_restored = torch.flip(token_ids_grid, dims=(1,))
         elif i == 7: # 90 degree rotated -> 270 degree rotation to restore
-            geom_restored = torch.rot90(logits_grid, k=3, dims=(0, 1))
+            geom_restored = torch.rot90(token_ids_grid, k=3, dims=(0, 1))
         elif i == 8: # transpose
-            geom_restored = logits_grid.transpose(0, 1)
+            geom_restored = token_ids_grid.transpose(0, 1)
         else:
             raise ValueError(f"Invalid augmentation index: {i}")
         return geom_restored
@@ -867,9 +885,89 @@ class ARCSolver:
 
         return padded.to(self.device), attn_mask.to(self.device)
 
+    # def predict(self, examples, questions_input):
+    #     # 프롬프트 데이터 구성
+    #     augment_num = 6
+    #     padded_ids, attn_mask = self.build_augmented_prompts(examples, questions_input, augment_num) # (B, seq_len)
+    #     batch_size = padded_ids.size(0) # B
+    #     N_prompt = padded_ids.size(1) # seq_len
+
+    #     with torch.no_grad():
+    #         outputs = self.model.generate(
+    #             input_ids=padded_ids,
+    #             attention_mask=attn_mask,
+    #             return_dict_in_generate=True,
+    #             output_scores=True,
+    #             max_new_tokens=150,
+    #             do_sample=True, 
+    #             temperature=0.7, 
+    #             top_p=0.8,
+    #             top_k=20,
+    #             eos_token_id=self.tokenizer.eos_token_id,
+    #             pad_token_id=self.tokenizer.pad_token_id,
+    #         )
+
+    #     # (B, gen_len, vocab_size)
+    #     scores = torch.stack(outputs.scores, dim=1)
+
+    #     batch_logits_grids = []
+    #     for i in range(batch_size):
+    #         seq = outputs.sequences[i] # (seq_len + gen_len)
+    #         gen_ids = seq[N_prompt:].tolist()
+
+    #         grid_rows = []
+    #         row_logits = []
+    #         for step_idx, tok in enumerate(gen_ids):
+    #             if tok == self.sep:
+    #                 if row_logits:
+    #                     grid_rows.append(torch.stack(row_logits, dim=0))
+    #                     row_logits = []
+    #             elif tok == self.tokenizer.eos_token_id or tok == self.tokenizer.pad_token_id:
+    #                 break
+    #             else:
+    #                 # get logits and apply softmax
+    #                 prob = torch.softmax(scores[i, step_idx, :], dim=-1)
+    #                 row_logits.append(prob)
+    #         if row_logits:
+    #             grid_rows.append(torch.stack(row_logits, dim=0))
+
+    #         try:
+    #             grid_tensor = torch.stack(grid_rows, dim=0) # (H, W, V)
+    #             unapplied_grid_tensor = self.unapply_augmentation(grid_tensor, i) # (H', W', V)
+    #             batch_logits_grids.append(unapplied_grid_tensor)
+    #         except Exception as e:
+    #             continue
+        
+    #     shape_3d = [g for g in batch_logits_grids if g.dim() == 3]
+    #     shape_counts = Counter(tuple(g.shape) for g in shape_3d)
+    #     most_frequent_shape = torch.Size(max(shape_counts, key=shape_counts.get))
+    #     valid_shape_3d = [g for g in shape_3d if tuple(g.shape) == tuple(most_frequent_shape)]
+
+    #     # (N, H, W, V)
+    #     stacked = torch.stack(valid_shape_3d, dim=0)
+
+    #     # (H, W, V)
+    #     sum_logits = torch.sum(stacked, dim=0)
+
+    #     # (H, W)
+    #     mask = torch.full_like(sum_logits, -1e9) # filter out other than 0-9
+    #     mask[:, :, self.pixel_ids] = 0
+    #     sum_logits = sum_logits + mask
+    #     top_token_ids = torch.argmax(sum_logits, dim=-1)
+
+    #     # (H, W)
+    #     inv_map = {k: i for i, k in enumerate(self.pixel_ids)}
+    #     values = [
+    #         [inv_map[tok] for tok in row]
+    #         for row in top_token_ids.tolist()
+    #     ]
+    #     most_likely_values = torch.tensor(values, dtype=torch.int64)
+
+    #     return most_likely_values.cpu().numpy()
+
     def predict(self, examples, questions_input):
         # 프롬프트 데이터 구성
-        augment_num = 6
+        augment_num = 4
         padded_ids, attn_mask = self.build_augmented_prompts(examples, questions_input, augment_num) # (B, seq_len)
         batch_size = padded_ids.size(0) # B
         N_prompt = padded_ids.size(1) # seq_len
@@ -892,62 +990,65 @@ class ARCSolver:
         # (B, gen_len, vocab_size)
         scores = torch.stack(outputs.scores, dim=1)
 
-        batch_logits_grids = []
+        batch_grids = []
+        shape_counts = Counter()
+
         for i in range(batch_size):
             seq = outputs.sequences[i] # (seq_len + gen_len)
             gen_ids = seq[N_prompt:].tolist()
 
             grid_rows = []
-            row_logits = []
+            row = []
+            sum_log_prob = 0.0
             for step_idx, tok in enumerate(gen_ids):
                 if tok == self.sep:
-                    if row_logits:
-                        grid_rows.append(torch.stack(row_logits, dim=0))
-                        row_logits = []
+                    if row:
+                        grid_rows.append(row.copy())
+                        row = []
                 elif tok == self.tokenizer.eos_token_id or tok == self.tokenizer.pad_token_id:
                     break
                 else:
                     # get logits and apply softmax
                     prob = torch.softmax(scores[i, step_idx, :], dim=-1)
-                    row_logits.append(prob)
-            if row_logits:
-                grid_rows.append(torch.stack(row_logits, dim=0))
+                    try:
+                        cell_id = self.pixel_ids.index(tok)
+                        row.append(cell_id)
+                    except ValueError:
+                        row.append(0)
+                    sum_log_prob += torch.log(prob[cell_id]).item()
+            if row:
+                grid_rows.append(row.copy())
+
+            if len(grid_rows) == 0:
+                continue
 
             try:
-                grid_tensor = torch.stack(grid_rows, dim=0) # (H, W, V)
-                unapplied_grid_tensor = self.unapply_augmentation(grid_tensor, i) # (H', W', V)
-                batch_logits_grids.append(unapplied_grid_tensor)
+                token_ids_grid = torch.tensor(grid_rows, dtype=torch.int64, device=self.device)
+                unapplied_grid = self.unapply_augmentation(token_ids_grid, i)
+                shape_counts[unapplied_grid.shape] += 1
+                batch_grids.append((unapplied_grid, sum_log_prob))
             except Exception as e:
                 continue
-        
-        shape_3d = [g for g in batch_logits_grids if g.dim() == 3]
-        shape_counts = Counter(tuple(g.shape) for g in shape_3d)
-        most_frequent_shape = torch.Size(max(shape_counts, key=shape_counts.get))
-        valid_shape_3d = [g for g in shape_3d if tuple(g.shape) == tuple(most_frequent_shape)]
 
-        # (N, H, W, V)
-        stacked = torch.stack(valid_shape_3d, dim=0)
+        most_frequent_shape = shape_counts.most_common(1)[0][0]
+        valid_grids = [g for g in batch_grids if g[0].shape == most_frequent_shape]
 
-        # (H, W, V)
-        sum_logits = torch.sum(stacked, dim=0)
-        # weights = stacked.max(dim=-1).values
-        # sum_logits = torch.sum(stacked * weights.unsqueeze(-1), dim=0)
+        # count content
+        content_counts = Counter()
+        for grid, _ in valid_grids:
+            content_counts[grid.cpu().numpy().tobytes()] += 1
 
-        # (H, W)
-        mask = torch.full_like(sum_logits, -1e9) # filter out other than 0-9
-        mask[:, :, self.pixel_ids] = 0
-        sum_logits = sum_logits + mask
-        top_token_ids = torch.argmax(sum_logits, dim=-1)
-
-        # (H, W)
-        inv_map = {k: i for i, k in enumerate(self.pixel_ids)}
-        values = [
-            [inv_map[tok] for tok in row]
-            for row in top_token_ids.tolist()
-        ]
-        most_likely_values = torch.tensor(values, dtype=torch.int64)
-
-        return most_likely_values.cpu().numpy()
+        # find the most frequent content
+        most_common_content = content_counts.most_common(1)[0]
+        if most_common_content[1] > 1:  # if there are multiple grids with the same content
+            # select the first grid with the most frequent content
+            for grid, _ in valid_grids:
+                if grid.cpu().numpy().tobytes() == most_common_content[0]:
+                    return grid.cpu().numpy()
+        else:  # if there is no grid with the same content, tie-breaking with log probability
+            valid_grids.sort(key=lambda x: x[1], reverse=True)
+            valid_grid, _ = valid_grids[0]
+            return valid_grid.cpu().numpy()
                 
     def prepare_evaluation(self, path="artifacts/qwen3-4b-lora/checkpoint-final"):
         """
