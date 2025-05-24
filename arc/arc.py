@@ -771,15 +771,10 @@ class ARCSolver:
     #     return grid
 
     def apply_augmentation(self, examples, questions_input, i):
-        if i < 2: # original, 90 degree rotated
-            augmented_examples = []
-            for example in examples:
-                augmented_examples.append({
-                    "input": np.rot90(example["input"], k=i).tolist(),
-                    "output": np.rot90(example["output"], k=i).tolist()
-                })
-            augmented_questions_input = np.rot90(questions_input, k=i).tolist()
-        elif i == 2: # flip horizontally
+        if i == 0: # original
+            augmented_examples = examples
+            augmented_questions_input = questions_input
+        elif i == 1: # flip horizontally
             augmented_examples = []
             for example in examples:
                 augmented_examples.append({
@@ -787,24 +782,16 @@ class ARCSolver:
                     "output": np.flip(example["output"], axis=1).tolist()
                 })
             augmented_questions_input = np.flip(questions_input, axis=1).tolist()
-        elif i == 3: # transpose
-            augmented_examples = []
-            for example in examples:
-                augmented_examples.append({
-                    "input": np.transpose(np.array(example["input"])).tolist(),
-                    "output": np.transpose(np.array(example["output"])).tolist()
-                })
-            augmented_questions_input = np.transpose(np.array(questions_input)).tolist()
-        elif i == 4: # invert colors
+        elif i == 2: # invert colors
             augmented_examples = []
             for example in examples:
                 augmented_examples.append({
                     "input": (9 - np.array(example["input"])).tolist(),
                     "output": (9 - np.array(example["output"])).tolist()
                 })
-            augmented_questions_input = (9 - np.array(questions_input)).tolist()            
-        elif i < 9: # color permutation
-            perm = np.array(self.color_perms[i-5]) 
+            augmented_questions_input = (9 - np.array(questions_input)).tolist() 
+        elif 3 <= i <= 6: # color permutation
+            perm = np.array(self.color_perms[i-3])
             augmented_examples = []
             for example in examples:
                 augmented_examples.append({
@@ -812,20 +799,33 @@ class ARCSolver:
                     "output": perm[np.array(example["output"])].tolist()
                 })
             augmented_questions_input = perm[np.array(questions_input)].tolist()
+        elif i == 7: # 90 degree rotated
+            augmented_examples = []
+            for example in examples:
+                augmented_examples.append({
+                    "input": np.rot90(example["input"], k=1).tolist(),
+                    "output": np.rot90(example["output"], k=1).tolist()
+                })
+            augmented_questions_input = np.rot90(questions_input, k=1).tolist()
+        elif i == 8: # transpose
+            augmented_examples = []
+            for example in examples:
+                augmented_examples.append({
+                    "input": np.transpose(np.array(example["input"])).tolist(),
+                    "output": np.transpose(np.array(example["output"])).tolist()
+                })
+            augmented_questions_input = np.transpose(np.array(questions_input)).tolist()
         else:
             raise ValueError(f"Invalid augmentation index: {i}")
 
         return augmented_examples, augmented_questions_input
 
     def unapply_augmentation(self, logits_grid: torch.Tensor, i):
-        if i < 2: # original, 90 degree rotated
-            k = (4 - i) % 4
-            geom_restored = torch.rot90(logits_grid, k=k, dims=(0, 1))
-        elif i == 2: # flip horizontally
+        if i == 0: # original
+            geom_restored = logits_grid
+        elif i == 1: # flip horizontally
             geom_restored = torch.flip(logits_grid, dims=(1,))
-        elif i == 3: # transpose
-            geom_restored = logits_grid.transpose(0, 1)
-        elif i == 4: # invert colors
+        elif i == 2: # invert colors
             V = logits_grid.size(-1)
             perm = torch.arange(V, device=logits_grid.device)
             for c in range(10):
@@ -833,15 +833,19 @@ class ARCSolver:
                 aug_id = self.pixel_ids[9 - c]
                 perm[orig_id] = aug_id
             geom_restored = logits_grid.index_select(-1, perm)
-        elif i < 9: # color permutation
-            inv = self.color_perms_inv[i-5]             # numpy array len-10
+        elif 3 <= i <= 6: # color permutation
+            inv = self.color_perms_inv[i-3]             # numpy array len-10
             V   = logits_grid.size(-1)
             perm = torch.arange(V, device=logits_grid.device)
             for c in range(10):
                 orig = self.pixel_ids[c]
                 invc = self.pixel_ids[inv[c]]
                 perm[orig] = invc
-            geom_restored = logits_grid.index_select(-1, perm) 
+            geom_restored = logits_grid.index_select(-1, perm)
+        elif i == 7: # 90 degree rotated -> 270 degree rotation to restore
+            geom_restored = torch.rot90(logits_grid, k=3, dims=(0, 1))
+        elif i == 8: # transpose
+            geom_restored = logits_grid.transpose(0, 1)
         else:
             raise ValueError(f"Invalid augmentation index: {i}")
         return geom_restored
