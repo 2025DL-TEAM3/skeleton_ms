@@ -85,6 +85,7 @@ class ARCSolver:
             self.model = PeftModel.from_pretrained(
                 self.model,
                 stage1_path,
+                adapter_name="stage1",
                 is_trainable=False, # stage1 LoRA is not trainable, freeze all parameters
             ).to(self.device)
             print(f"✓ Stage1 model loaded from {stage1_path}")
@@ -105,6 +106,15 @@ class ARCSolver:
             self.tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)
         ]
         self.sep = self.tokenizer.encode("\n", add_special_tokens=False)[0]
+
+        # color permutation
+        self.color_perms = [
+            [0,2,3,4,5,6,7,8,9,1],
+            [0,4,2,3,5,1,6,8,9,7],
+            [0,2,3,1,5,6,4,8,9,7],
+            [0,9,1,2,3,4,5,6,7,8],
+        ]
+        self.color_perms_inv = [np.argsort(perm) for perm in self.color_perms]
 
     def parse_grid(self, ids: List[int]):
         """
@@ -350,6 +360,9 @@ class ARCSolver:
                 lora_dropout=0.1,        # Dropout probability for LoRA layers
                 target_modules=["lm_head"],
             )
+            self.model.add_adapter("stage2", peft_config)
+            self.model.set_adapter("stage2")
+            self.model.print_trainable_parameters()
         else:
             peft_config = LoraConfig(
                 task_type="CAUSAL_LM",
@@ -359,16 +372,9 @@ class ARCSolver:
                 lora_dropout=0.1,        # Dropout probability for LoRA layers
                 target_modules=["q_proj","k_proj","v_proj","o_proj"],
             )
-
-        # attach new lora_A / lora_B to the model
-        self.model = get_peft_model(self.model, peft_config)
-        self.model.print_trainable_parameters() # Display the number of trainable parameters
-
-        if self.stage2:
-            # get_peft_model re-activate (set requires_grad to True) for all LoRA weights
-            for n, p in self.model.named_parameters():
-                p.requires_grad = "lm_head" in n and "lora_" in n # only lm_head is trainable
-            self.model.print_trainable_parameters()
+            # attach new LoRA to the model
+            self.model = get_peft_model(self.model, peft_config, adapter_name="stage1")
+            self.model.print_trainable_parameters() # Display the number of trainable parameters
         
         # Initialize dataset and data loader
         dataset = ARCDataset(train_dataset, self.tokenizer, self, steps_per_file=steps_per_file, is_validation=False)
@@ -789,7 +795,7 @@ class ARCSolver:
     #     return grid
 
     def apply_augmentation(self, examples, questions_input, i):
-        if i < 4:
+        if i < 2: # original, 90 degree rotated
             augmented_examples = []
             for example in examples:
                 augmented_examples.append({
@@ -797,23 +803,15 @@ class ARCSolver:
                     "output": np.rot90(example["output"], k=i).tolist()
                 })
             augmented_questions_input = np.rot90(questions_input, k=i).tolist()
-        elif i < 6:
+        elif i == 2: # flip horizontally
             augmented_examples = []
             for example in examples:
                 augmented_examples.append({
-                    "input": np.flip(example["input"], axis=(i - 4) % 2).tolist(),
-                    "output": np.flip(example["output"], axis=(i - 4) % 2).tolist()
+                    "input": np.flip(example["input"], axis=1).tolist(),
+                    "output": np.flip(example["output"], axis=1).tolist()
                 })
-            augmented_questions_input = np.flip(questions_input, axis=(i - 4) % 2).tolist()
-        elif i == 6:
-            augmented_examples = []
-            for example in examples:
-                augmented_examples.append({
-                    "input": (9 - np.array(example["input"])).tolist(),
-                    "output": (9 - np.array(example["output"])).tolist()
-                })
-            augmented_questions_input = (9 - np.array(questions_input)).tolist()
-        elif i == 7:
+            augmented_questions_input = np.flip(questions_input, axis=1).tolist()
+        elif i == 3: # transpose
             augmented_examples = []
             for example in examples:
                 augmented_examples.append({
@@ -821,17 +819,37 @@ class ARCSolver:
                     "output": np.transpose(np.array(example["output"])).tolist()
                 })
             augmented_questions_input = np.transpose(np.array(questions_input)).tolist()
+        elif i == 4: # invert colors
+            augmented_examples = []
+            for example in examples:
+                augmented_examples.append({
+                    "input": (9 - np.array(example["input"])).tolist(),
+                    "output": (9 - np.array(example["output"])).tolist()
+                })
+            augmented_questions_input = (9 - np.array(questions_input)).tolist()            
+        elif i < 9: # color permutation
+            perm = np.array(self.color_perms[i-5]) 
+            augmented_examples = []
+            for example in examples:
+                augmented_examples.append({
+                    "input": perm[np.array(example["input"])].tolist(),
+                    "output": perm[np.array(example["output"])].tolist()
+                })
+            augmented_questions_input = perm[np.array(questions_input)].tolist()
         else:
             raise ValueError(f"Invalid augmentation index: {i}")
+
         return augmented_examples, augmented_questions_input
 
     def unapply_augmentation(self, logits_grid: torch.Tensor, i):
-        if i < 4:
+        if i < 2: # original, 90 degree rotated
             k = (4 - i) % 4
             geom_restored = torch.rot90(logits_grid, k=k, dims=(0, 1))
-        elif i < 6:
-            geom_restored = torch.flip(logits_grid, dims=((i - 4) % 2,))
-        elif i == 6:
+        elif i == 2: # flip horizontally
+            geom_restored = torch.flip(logits_grid, dims=(1,))
+        elif i == 3: # transpose
+            geom_restored = logits_grid.transpose(0, 1)
+        elif i == 4: # invert colors
             V = logits_grid.size(-1)
             perm = torch.arange(V, device=logits_grid.device)
             for c in range(10):
@@ -839,16 +857,23 @@ class ARCSolver:
                 aug_id = self.pixel_ids[9 - c]
                 perm[orig_id] = aug_id
             geom_restored = logits_grid.index_select(-1, perm)
-        elif i == 7:
-            geom_restored = logits_grid.transpose(0, 1)
+        elif i < 9: # color permutation
+            inv = self.color_perms_inv[i-5]             # numpy array len-10
+            V   = logits_grid.size(-1)
+            perm = torch.arange(V, device=logits_grid.device)
+            for c in range(10):
+                orig = self.pixel_ids[c]
+                invc = self.pixel_ids[inv[c]]
+                perm[orig] = invc
+            geom_restored = logits_grid.index_select(-1, perm) 
         else:
             raise ValueError(f"Invalid augmentation index: {i}")
         return geom_restored
 
-    def build_augmented_prompts(self, examples, questions_input):
+    def build_augmented_prompts(self, examples, questions_input, augment_num):
         prompts_ids = []
 
-        for i in range(8):
+        for i in range(augment_num):
             augmented_examples, augmented_questions_input = self.apply_augmentation(examples, questions_input, i)
             prompt = self.format_prompt({"train": augmented_examples, "test": [{"input": augmented_questions_input}]})
             prompts_ids.append(prompt['input_ids'])
@@ -861,7 +886,8 @@ class ARCSolver:
 
     def predict(self, examples, questions_input):
         # 프롬프트 데이터 구성
-        padded_ids, attn_mask = self.build_augmented_prompts(examples, questions_input) # (B, seq_len)
+        augment_num = 8
+        padded_ids, attn_mask = self.build_augmented_prompts(examples, questions_input, augment_num) # (B, seq_len)
         batch_size = padded_ids.size(0) # B
         N_prompt = padded_ids.size(1) # seq_len
 
@@ -940,7 +966,7 @@ class ARCSolver:
 
         return most_likely_values.cpu().numpy()
                 
-    def prepare_evaluation(self, path="artifacts/qwen3-4b-lora/checkpoint-final"):
+    def prepare_evaluation(self, path="artifacts/qwen3-4b-lora/checkpoint-final", use_custom_head=False):
         """
         Load pretrained weight, make model eval mode, etc.
         """
@@ -956,6 +982,24 @@ class ARCSolver:
                 cache_dir=cache_dir
             )
             print(f"Loaded LoRA adapter: {path}")
+
+            if use_custom_head:
+                # now untie the embed_tok and lm_head
+                self.model.tie_word_embeddings = False
+
+                # clone embedding to lm_head, shrink model embeddings
+                # in_emb: [V, hidden_dim] -> [K, hidden_dim] , out_emb: [V, hidden_dim] -> [K, hidden_dim]
+                self.model, self.tokenizer, self.token_mapping = apply_custom_head(self.model, self.tokenizer)
+                self.model.config.pad_token_id = self.tokenizer.pad_token_id
+                self.model.config.eos_token_id = self.tokenizer.eos_token_id
+
+                print(f"✓ Model vocabulary optimized for ARC: {len(self.token_mapping)} tokens kept")
+
+                self.pixel_ids = [
+                    self.tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)
+                ]
+                self.sep = self.tokenizer.encode("\n", add_special_tokens=False)[0]
+
         except Exception as e:
             print(f"No adapter found: {e}")
         self.model.eval()
