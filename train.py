@@ -10,6 +10,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train ARCSolver with ARC dataset')
     parser.add_argument('--token', type=str, default=None, help='HuggingFace token')
     parser.add_argument('--dataset', type=str, default='/home/student/workspace/dataset', help='Dataset name or path')
+    parser.add_argument('--stage1', type=str, default=None, help='Stage1 model path')
     parser.add_argument('--save_dir', type=str, default='artifacts/qwen3-4b-lora', help='Save directory')
     parser.add_argument('--resume_from', type=str, default=None, help='Resume training from checkpoint')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
@@ -29,7 +30,7 @@ def main():
     print("Loading and splitting dataset...")
     data_files = sorted(glob.glob(f"{args.dataset}/*.json"))  # 정렬된 순서로 파일 목록 가져오기
     random.shuffle(data_files)  # 고정된 시드로 섞기
-    split_idx = int(len(data_files) * 0.9)
+    split_idx = int(len(data_files) * 0.95)
     train_files = data_files[:split_idx]
     val_files = data_files[split_idx:]
     print(f"Train files: {len(train_files)}, Validation files: {len(val_files)}")
@@ -43,7 +44,7 @@ def main():
     
     # ARCSolver 인스턴스 생성
     print("Initializing model...")
-    solver = ARCSolver(token=args.token)
+    solver = ARCSolver(token=args.token, stage1_path=args.stage1)
 
     # configuration
     batch_size = 1
