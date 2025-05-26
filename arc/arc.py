@@ -343,8 +343,8 @@ class ARCSolver:
         peft_config = LoraConfig(
             task_type="CAUSAL_LM",
             inference_mode=False,
-            r=16,                     # LoRA rank - determines the size of the update matrices
-            lora_alpha=32,           # LoRA scaling factor - controls the magnitude of updates
+            r=8,                     # LoRA rank - determines the size of the update matrices
+            lora_alpha=16,           # LoRA scaling factor - controls the magnitude of updates
             lora_dropout=0.1,        # Dropout probability for LoRA layers
             target_modules=["q_proj","k_proj","v_proj","o_proj", "lm_head"],
         )
@@ -819,6 +819,14 @@ class ARCSolver:
                     "output": np.transpose(np.array(example["output"])).tolist()
                 })
             augmented_questions_input = np.transpose(np.array(questions_input)).tolist()
+        elif i == 9: # flip vertically
+            augmented_examples = []
+            for example in examples:
+                augmented_examples.append({
+                    "input": np.flip(example["input"], axis=0).tolist(),
+                    "output": np.flip(example["output"], axis=0).tolist()
+                })
+            augmented_questions_input = np.flip(questions_input, axis=0).tolist()
         else:
             raise ValueError(f"Invalid augmentation index: {i}")
 
@@ -868,6 +876,8 @@ class ARCSolver:
             geom_restored = torch.rot90(token_ids_grid, k=3, dims=(0, 1))
         elif i == 8: # transpose
             geom_restored = token_ids_grid.transpose(0, 1)
+        elif i == 9: # flip vertically
+            geom_restored = torch.flip(token_ids_grid, dims=(0,))
         else:
             raise ValueError(f"Invalid augmentation index: {i}")
         return geom_restored
@@ -968,7 +978,7 @@ class ARCSolver:
 
     def predict(self, examples, questions_input):
         # 프롬프트 데이터 구성
-        augment_num = 4
+        augment_num = 8
         padded_ids, attn_mask = self.build_augmented_prompts(examples, questions_input, augment_num) # (B, seq_len)
         batch_size = padded_ids.size(0) # B
         N_prompt = padded_ids.size(1) # seq_len
