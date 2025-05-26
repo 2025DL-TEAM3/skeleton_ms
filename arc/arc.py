@@ -680,6 +680,7 @@ class ARCSolver:
         os.makedirs(path, exist_ok=True)
         # save model weight + PEFT adapter
         self.model.save_pretrained(path)
+        self.tokenizer.save_pretrained(path)
         # save optimizer + scheduler state
         if optimizer is not None:
             torch.save(optimizer.state_dict(), os.path.join(path, "optimizer.pth"))
@@ -978,7 +979,7 @@ class ARCSolver:
                 attention_mask=attn_mask,
                 return_dict_in_generate=True,
                 output_scores=True,
-                max_new_tokens=150,
+                max_new_tokens=111, # 10x10 + 10 sep + eos
                 do_sample=True, 
                 temperature=0.5, 
                 top_p=0.8,
@@ -1031,8 +1032,14 @@ class ARCSolver:
             except Exception as e:
                 continue
 
+        if not shape_counts:
+            return np.random.randint(0, 10, (len(questions_input), len(questions_input[0])))
+
         most_frequent_shape = shape_counts.most_common(1)[0][0]
         valid_grids = [g for g in batch_grids if g[0].shape == most_frequent_shape]
+
+        if len(valid_grids) == 0:
+            return np.random.randint(0, 10, (len(questions_input), len(questions_input[0])))
 
         # count content
         content_counts = Counter()
