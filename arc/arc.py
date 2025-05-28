@@ -210,6 +210,17 @@ class ARCSolver:
             for row in grid
         )
 
+    def random_color_permutation(self):
+        colors = list(range(1, 10))
+        shuffled_colors = colors.copy()
+        random.shuffle(shuffled_colors)
+
+        color_mapping = {0: 0}  # 배경색은 항상 0으로 유지
+        for original, new in zip(colors, shuffled_colors):
+            color_mapping[original] = new
+
+        return color_mapping
+
     def format_prompt(self, datapoint):
         # Build example block
         n = len(datapoint['train'])
@@ -220,10 +231,19 @@ class ARCSolver:
             examples_block += self.grid_to_str(ex['input'])
             examples_block += f"Example {i} Output:\n"
             examples_block += self.grid_to_str(ex['output'])
+            # examples_block += f"Example {2*i} Input:\n"
+            # examples_block += self.grid_to_str(ex['input'])
+            # examples_block += f"Example {2*i} Output:\n"
+            # examples_block += self.grid_to_str(ex['output'])
+            # color_mapping = self.random_color_permutation()
+            # examples_block += f"Example {2*i+1} Input:\n"
+            # examples_block += self.grid_to_str([[color_mapping[c] for c in row] for row in ex['input']])
+            # examples_block += f"Example {2*i+1} Output:\n"
+            # examples_block += self.grid_to_str([[color_mapping[c] for c in row] for row in ex['output']])
         template1 = user_message_template1.format(n=n, plural=plural) + "\n" + examples_block + "Observe how each input becomes its output."
 
         # Build test input block
-        test_input = f"Test Input:\n{self.grid_to_str(datapoint['test'][0]['input'])}"
+        test_input = f"{self.grid_to_str(datapoint['test'][0]['input'])}"
         template2 = user_message_template2 + "\n" + test_input
 
         # Assemble messages for chat template
@@ -343,8 +363,8 @@ class ARCSolver:
         peft_config = LoraConfig(
             task_type="CAUSAL_LM",
             inference_mode=False,
-            r=8,                     # LoRA rank - determines the size of the update matrices
-            lora_alpha=16,           # LoRA scaling factor - controls the magnitude of updates
+            r=16,                     # LoRA rank - determines the size of the update matrices
+            lora_alpha=32,           # LoRA scaling factor - controls the magnitude of updates
             lora_dropout=0.1,        # Dropout probability for LoRA layers
             target_modules=["q_proj","k_proj","v_proj","o_proj", "lm_head"],
         )
@@ -413,13 +433,14 @@ class ARCSolver:
             log_message(f"Resuming from batch {skip_batches} (epoch {start_epoch}, step {global_step})")
         
         # batch sampler 생성
-        batch_sampler = FileBatchSampler(
-            dataset, 
-            batch_size,
-            seed=fixed_seed + start_epoch if resume_from else None,  # resume 시에만 seed 설정
-            skip_batches=skip_batches
-        )
-        loader = DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=self.dynamic_collate)
+        # batch_sampler = FileBatchSampler(
+        #     dataset, 
+        #     batch_size,
+        #     seed=fixed_seed + start_epoch if resume_from else None,  # resume 시에만 seed 설정
+        #     skip_batches=skip_batches
+        # )
+        # loader = DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=self.dynamic_collate)
+        loader = DataLoader(dataset, batch_size, shuffle=True, collate_fn=self.dynamic_collate)
 
         # Initialize validation dataset and data loader if provided
         val_loader = None
